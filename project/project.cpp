@@ -2,10 +2,70 @@
 #include <chrono>
 #include <thread>
 #include <boost/program_options.hpp>
+#include <filesystem>
+#include <fstream>
 #include <boost/interprocess/shared_memory_object.hpp>
 
 namespace po = boost::program_options;
 namespace ip = boost::interprocess;
+
+constexpr unsigned int max_memory_size = 1048576; // 1 MB
+constexpr unsigned int chunk_size = 65535;
+bool memory_not_needed = false;
+
+bool memory_exists(const std::string& name) {
+    try {
+        ip::shared_memory_object shm(
+            ip::open_only,
+            name.c_str(),
+            ip::read_write
+        );
+        return true; // Memory object exists
+    }
+    catch (const ip::interprocess_exception& ex) {
+        return false; // Memory object does not exist
+    }
+}
+
+class MemoryHolder{
+public:
+    ip::shared_memory_object shm;
+	std::string memory_name;
+	bool remove_needed = true;
+
+    MemoryHolder(const std::string& name, std::size_t size, bool create)
+    {	
+		memory_name.append(name);
+        remove_needed = create;
+        if(create){
+            shm = ip::shared_memory_object(
+                ip::create_only,
+                name.c_str(),
+                ip::read_write
+            );
+            shm.truncate(size);
+            std::cout << "Memory object created. " << std::endl;
+        }else{
+            shm = ip::shared_memory_object(
+                ip::open_only,
+                name.c_str(),
+                ip::read_write
+            );
+            std::cout << "Memory object opened. " << std::endl;
+        }
+    }
+
+    ~MemoryHolder()
+    {
+        if(remove_needed){
+            ip::shared_memory_object::remove(memory_name.c_str());
+            std::cout << "Memory object removed. " << std::endl;
+        }
+        else {
+			std::cout << "Memory object released. " << std::endl;
+        }
+    }
+};
 
 int main(int argc, char* argv[])
 {
@@ -35,9 +95,7 @@ int main(int argc, char* argv[])
     }
     else if (!vm.count("memory")) {
         std::cout << "Memory name was not set." << std::endl;
-	}
-    else {
-        std::cout << std::endl;
+	}else{
         /*std::cout << "Source: " << vm["source"].as<std::string>() << std::endl;
 		std::cout << "Destination: " << vm["destination"].as<std::string>() << std::endl;
 		std::cout << "Memory: " << vm["memory"].as<std::string>() << std::endl;*/
@@ -48,33 +106,45 @@ int main(int argc, char* argv[])
         constexpr unsigned int USER = 1;
 		int role = CREATOR; // 0 - creator, 1 - user
 
-        try {
-            ip::shared_memory_object shm(
-                ip::create_only,
-                vm["memory"].as<std::string>().c_str(),
-                ip::read_write
-            );
-            std::cout << "Memory object created. " << std::endl;
-        }
-        catch (const ip::interprocess_exception& ex) {
-            ip::shared_memory_object shm_obj(
-                ip::open_only,
-                vm["memory"].as<std::string>().c_str(),
-                ip::read_write
-            );
-            std::cout << "Memory object opened. " << std::endl;
-			role = 1;
+        if( memory_exists(vm["memory"].as<std::string>())){
+            role = USER;
 		}
 
-        if(USER == role){
-            for(int i = 0; i < 1000; ++i){
-                // Simulate work
-                //std::this_thread::sleep_for(std::chrono::microseconds(1));
-			}
-            ip::shared_memory_object::remove(vm["memory"].as<std::string>().c_str());
-            std::cout << "Memory object removed. " << std::endl;
-        }else {
-			std::cout << "User role, not removing memory object. " << std::endl;
+        if(role == USER){
+
+            std::ifstream input_file(vm["source"].as<std::string>(), std::ios::binary);
+            if (!input_file) {
+                std::cerr << "Error opening source file: " << vm["source"].as<std::string>() << std::endl;
+                return 1;
+            }else{ // here the work with file
+                MemoryHolder memory_holder(
+                    vm["memory"].as<std::string>(),
+                    max_memory_size,
+                    false
+				);
+
+
+
+				memory_not_needed = true;
+            }
+		}else {  // role == CREATOR
+
+            std::ofstream input_file(vm["destination"].as<std::string>(), std::ios::binary);
+            if (!input_file) {
+                std::cerr << "Error opening source file: " << vm["destination"].as<std::string>() << std::endl;
+                return 1;
+            }else { // here the work with file
+                MemoryHolder memory_holder(
+                    vm["memory"].as<std::string>(),
+                    max_memory_size,
+                    true
+                );
+
+
+
+
+				do {} while (!memory_not_needed);
+            }
         }
     }
 
