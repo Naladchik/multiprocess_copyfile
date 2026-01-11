@@ -23,17 +23,17 @@ public:
     ip::interprocess_mutex mtx;
     ip::interprocess_condition cv;
 
-    char buf[2][chunk_size] = {0};
+    char buf[2][chunk_size] = {1};
 
-    unsigned char buf_prod = 0;  // number of buffer for the next operation of producer
-    unsigned char buf_cons = 0;  // number of buffer for the next operation of consumer
-    unsigned char prod_num = 2;  // number of available for procurer buffers
-    unsigned char cons_num = 0;  // number of available for consumer buffers
+    bool was_written = false;
+    bool user_is_on = false;
     int actual_size = 0;
     bool creator_finish = false;
 	bool user_finish = false;
 };
 
+unsigned char buf_prod = 0;  // number of buffer for the next operation of producer
+unsigned char buf_cons = 0;  // number of buffer for the next operation of consumer
 
 int main(int argc, char* argv[])
 {
@@ -83,74 +83,78 @@ int main(int argc, char* argv[])
             std::cout << "CREATOR: STARTED" << std::endl;
         }
         catch (const ip::interprocess_exception&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
             role = USER;
             std::cout << "USER: STARTED" << std::endl;
         }
 
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-        if (role == USER) { std::cout << "LABEL: 1" << std::endl; }
-        try {
-            SharedVars* sch_vars = new (region.get_address()) SharedVars;
-        }
-        catch (const ip::interprocess_exception& ex) {
-            std::cout << "EXCEPTION: " << ex.what() << std::endl;
-        }
-        if (role == USER) { std::cout << "LABEL: 2" << std::endl; }
+        //if (role == USER) { std::cout << "LABEL: 1" << std::endl; }
+        SharedVars* sch_vars = new (region.get_address()) SharedVars;
+        
+        //if (role == USER) { std::cout << "LABEL: 2" << std::endl; }
 
         if(role == CREATOR){
-            std::cout << "CREATOR: STARTED INSIDE" << std::endl;
+            while(!sch_vars->user_is_on){
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
 
-   //         std::ifstream input_file(vm["source"].as<std::string>(), std::ios::binary);
-   //         
-   //         while (!input_file.eof()) {
-   //             {
-   //                 ip::scoped_lock<ip::interprocess_mutex> lock(sch_vars->mtx);
-   //                 sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->prod_num > 0; });
-   //                 sch_vars->prod_num--;
-   //             }
+            std::ifstream input_file(vm["source"].as<std::string>(), std::ios::binary);
+            
+            while (!input_file.eof()) {
 
-   //             input_file.read(sch_vars->buf[sch_vars->buf_prod], chunk_size);
-   //             sch_vars->buf_prod ^= 0x01;
+                input_file.read(sch_vars->buf[buf_prod], chunk_size);
+                buf_prod ^= 0x01;
 
-   //             {
-   //                 ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-   //                 sch_vars->actual_size = (unsigned int) input_file.gcount();  // transmit size to consumer
-   //                 sch_vars->cons_num++;
-   //                 sch_vars->cv.notify_one();
-   //             }
-   //         }
-   //         sch_vars->creator_finish = true;
+                {
+                    ip::scoped_lock<ip::interprocess_mutex> lock(sch_vars->mtx);
+                    sch_vars->actual_size = (unsigned int) input_file.gcount();  // transmit size to consumer
+                    sch_vars->was_written = true;
+                    sch_vars->cv.notify_one();
+                    //sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->was_written; });
+                }
+            }
 
-            //while(!sch_vars->user_finish){
-                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-			//}
+            sch_vars->creator_finish = true;
+
+			bool sig_ok = false;
+            for (int i = 0; i < 100; i++){
+                if(sch_vars->user_finish){
+                    sig_ok = true;
+                    break;
+				}
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if(!sig_ok){
+				std::cout << "CREATOR: TIMEOUT WAITING FOR USER" << std::endl;
+			}
 
             ip::shared_memory_object::remove(vm["memory"].as<std::string>().c_str());
             std::cout << "CREATOR: FINISHED" << std::endl;
 
 		}
 		else { // role == USER
-            std::cout << "USER: STARTED INSIDE" << std::endl;
-            //std::ofstream output_file(vm["destination"].as<std::string>(), std::ios::binary);
+            std::ofstream output_file(vm["destination"].as<std::string>(), std::ios::binary);
 
-            /*while (true) {
+            sch_vars->user_is_on = true;
+
+            while (true) {
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->cons_num > 0; });
-                    sch_vars->cons_num--;
-                }
-                output_file.write(sch_vars->buf[sch_vars->buf_cons], sch_vars->actual_size);
-                sch_vars->buf_cons ^= 0x01;
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->prod_num++;
-                    if (sch_vars->creator_finish && (sch_vars->cons_num == 0)) break;
+                    sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->was_written == true;; });
+                    sch_vars->was_written = false;
                     sch_vars->cv.notify_one();
                 }
-            }*/
-            //sch_vars->user_finish = true;
+
+                output_file.write(sch_vars->buf[buf_cons], sch_vars->actual_size);
+                buf_cons ^= 0x01;
+                
+                if (sch_vars->creator_finish) break;
+            }
+
+            sch_vars->user_finish = true;
+
             std::cout << "USER: FINISHED" << std::endl;
         }
     }
