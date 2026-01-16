@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <chrono>
 #include <thread>
 #include <boost/program_options.hpp>
@@ -15,18 +15,17 @@ using namespace std::literals;
 namespace po = boost::program_options;
 namespace ip = boost::interprocess;
 
-#define DEL10US std::this_thread::sleep_for(std::chrono::microseconds(10))
-#define READING std::this_thread::sleep_for(std::chrono::milliseconds(100))
-#define WRITING std::this_thread::sleep_for(std::chrono::milliseconds(200))
-
 constexpr uint16_t kChunksCount{ 2 };
 constexpr uint16_t kChunkSize{ 0xffff };
 
 constexpr int kNotFound{ -1 };
 constexpr streamsize kReadyToRead{ 0 };
 
-constexpr unsigned int CREATOR = 0;
-constexpr unsigned int USER = 1;
+enum class Role : unsigned int {
+    CREATOR = 0,
+    USER = 1
+};
+
 
 struct DataChunk {
     array<char, kChunkSize> data{ };
@@ -54,8 +53,10 @@ public:
     bool finish = false;
 };
 
-unsigned char buf_prod = 0;  // number of buffer for the next operation of producer
-unsigned char buf_cons = 0;  // number of buffer for the next operation of consumer
+struct SharedMemoryLayout {
+    atomic<bool> ready;
+    SharedVars vars;
+};
 
 int main(int argc, char* argv[])
 {
@@ -72,7 +73,7 @@ int main(int argc, char* argv[])
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
 
-    if (vm.count("help")) {
+    if (vm.count("help")) { // [m] vm. contains is supposed to be here
         std::cout << desc << std::endl;
         return 1;
     }
@@ -101,22 +102,26 @@ int main(int argc, char* argv[])
         // memory is created or opened if already exists
         try {
             shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-            shm_obj_ptr->truncate(sizeof(int) * 3 * kChunkSize);
-            role = CREATOR;
+			shm_obj_ptr->truncate(sizeof(SharedMemoryLayout)); // [f] sizeof(SharedVars)
+            role = static_cast<unsigned int>(Role::CREATOR);
             std::cout << "CREATOR: STARTED" << std::endl;
         }
         catch (const ip::interprocess_exception&) {
-            DEL10US;
+            std::this_thread::sleep_for(std::chrono::microseconds(10));  //workaround for unknown yet issue
             shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
-            role = USER;
+            role = static_cast<unsigned int>(Role::USER);
             std::cout << "USER: STARTED" << std::endl;
         }
 
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
+        //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
 
+        if (role == static_cast<unsigned int>(Role::CREATOR)) {
+            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
+            new (&shm->vars) SharedVars;
+            shm->ready.store(true, std::memory_order_release);
 
-        if (role == CREATOR) {
-            SharedVars* sch_vars = new (region.get_address()) SharedVars;
+            SharedVars* sch_vars = &shm->vars;
 
             ifstream input_file(vm["source"].as<string>(), ios::binary);
 
@@ -153,8 +158,9 @@ int main(int argc, char* argv[])
             std::cout << "CREATOR: FINISHED" << std::endl;
         }
         else { // role == USER
-            SharedVars* sch_vars = static_cast<SharedVars*>(region.get_address());
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
+            while (!shm->ready.load(std::memory_order_acquire)) {}
+            SharedVars* sch_vars = &shm->vars;
 
             std::ofstream output_file(vm["destination"].as<std::string>(), std::ios::binary);
 
@@ -183,9 +189,6 @@ int main(int argc, char* argv[])
                     break;
                 }
             }
-
-
-
 
 
             {  //user ends and sends signal to creator
