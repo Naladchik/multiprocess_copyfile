@@ -9,27 +9,49 @@
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
 #include <boost/interprocess/sync/interprocess_condition.hpp>
 
+using namespace std;
+using namespace std::literals;
+
 namespace po = boost::program_options;
 namespace ip = boost::interprocess;
 
-constexpr unsigned int chunk_size = 65535;
-constexpr unsigned int mem_size = 3 * chunk_size;
+#define DEL10US std::this_thread::sleep_for(std::chrono::microseconds(10))
+#define READING std::this_thread::sleep_for(std::chrono::milliseconds(100))
+#define WRITING std::this_thread::sleep_for(std::chrono::milliseconds(200))
+
+constexpr uint16_t kChunksCount{ 2 };
+constexpr uint16_t kChunkSize{ 0xffff };
+
+constexpr int kNotFound{ -1 };
+constexpr streamsize kReadyToRead{ 0 };
 
 constexpr unsigned int CREATOR = 0;
 constexpr unsigned int USER = 1;
 
+struct DataChunk {
+    array<char, kChunkSize> data{ };
+    streamsize size{ 0 };
+    streamsize index{ kReadyToRead };
+};
+
 class SharedVars {
 public:
+    std::atomic<bool> initialized = false;
     ip::interprocess_mutex mtx;
     ip::interprocess_condition cv;
 
-    char buf[2][chunk_size] = {1};
+    array<DataChunk, kChunksCount> chunks;
 
-    bool was_written = false;
-    bool user_is_on = false;
-    int actual_size = 0;
-    bool creator_finish = false;
-	bool user_finish = false;
+    int get_next_index(int index) {
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            if (chunks[i].index == index) {
+                return static_cast<int>(i);
+            }
+        }
+        return kNotFound;
+    }
+
+    bool finish = false;
 };
 
 unsigned char buf_prod = 0;  // number of buffer for the next operation of producer
@@ -63,97 +85,114 @@ int main(int argc, char* argv[])
     }
     else if (!vm.count("memory")) {
         std::cout << "Memory name was not set." << std::endl;
-	}else{
+    }
+    else {
         /*std::cout << "Source: " << vm["source"].as<std::string>() << std::endl;
-		std::cout << "Destination: " << vm["destination"].as<std::string>() << std::endl;
-		std::cout << "Memory: " << vm["memory"].as<std::string>() << std::endl;*/
+        std::cout << "Destination: " << vm["destination"].as<std::string>() << std::endl;
+        std::cout << "Memory: " << vm["memory"].as<std::string>() << std::endl;*/
 
         // ============== MAIN LOGIC IS HERE ======================================
         std::unique_ptr<ip::shared_memory_object> shm_obj_ptr;
 
         int role;
 
-	    const auto & mem_name = vm["memory"].as<std::string>();
+        const auto& mem_name = vm["memory"].as<std::string>();
 
         // memory is created or opened if already exists
         try {
             shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-            shm_obj_ptr->truncate(sizeof(int) * mem_size);
+            shm_obj_ptr->truncate(sizeof(int) * 3 * kChunkSize);
             role = CREATOR;
             std::cout << "CREATOR: STARTED" << std::endl;
         }
         catch (const ip::interprocess_exception&) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            DEL10US;
             shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
             role = USER;
             std::cout << "USER: STARTED" << std::endl;
         }
 
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-        //if (role == USER) { std::cout << "LABEL: 1" << std::endl; }
-        SharedVars* sch_vars = new (region.get_address()) SharedVars;
-        
-        //if (role == USER) { std::cout << "LABEL: 2" << std::endl; }
 
-        if(role == CREATOR){
-            while(!sch_vars->user_is_on){
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
 
-            std::ifstream input_file(vm["source"].as<std::string>(), std::ios::binary);
-            
-            while (!input_file.eof()) {
+        if (role == CREATOR) {
+            SharedVars* sch_vars = new (region.get_address()) SharedVars;
 
-                input_file.read(sch_vars->buf[buf_prod], chunk_size);
-                buf_prod ^= 0x01;
+            ifstream input_file(vm["source"].as<string>(), ios::binary);
 
+            size_t chunkIndex{ kReadyToRead };
+            size_t readyToReadIndex{ 0 };
+
+            while (true) {
+                auto& chunk = sch_vars->chunks[readyToReadIndex];
+                input_file.read(chunk.data.data(), kChunkSize);
+                chunk.size = input_file.gcount();
                 {
-                    ip::scoped_lock<ip::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->actual_size = (unsigned int) input_file.gcount();  // transmit size to consumer
-                    sch_vars->was_written = true;
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    chunk.index = ++chunkIndex;
+                    readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
                     sch_vars->cv.notify_one();
-                    //sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->was_written; });
+                    if (chunk.size != kChunkSize) {
+                        break;
+                    }
+                    if (kNotFound == readyToReadIndex) {
+                        sch_vars->cv.wait(lock, [&readyToReadIndex, sch_vars] {
+                            readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
+                            return kNotFound != readyToReadIndex;
+                            });
+                    }
                 }
             }
 
-            sch_vars->creator_finish = true;
-
-			bool sig_ok = false;
-            for (int i = 0; i < 100; i++){
-                if(sch_vars->user_finish){
-                    sig_ok = true;
-                    break;
-				}
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            {  // wait until user ends
+                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
             }
-            if(!sig_ok){
-				std::cout << "CREATOR: TIMEOUT WAITING FOR USER" << std::endl;
-			}
 
-            ip::shared_memory_object::remove(vm["memory"].as<std::string>().c_str());
+            ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
             std::cout << "CREATOR: FINISHED" << std::endl;
+        }
+        else { // role == USER
+            SharedVars* sch_vars = static_cast<SharedVars*>(region.get_address());
+            std::this_thread::sleep_for(std::chrono::seconds(1));
 
-		}
-		else { // role == USER
             std::ofstream output_file(vm["destination"].as<std::string>(), std::ios::binary);
 
-            sch_vars->user_is_on = true;
-
+            int chunkIndex{ kReadyToRead + 1 };
+            int readyToWriteIndex{ kNotFound };
             while (true) {
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->was_written == true;; });
-                    sch_vars->was_written = false;
-                    sch_vars->cv.notify_one();
+                    if (readyToWriteIndex != kNotFound) {
+                        auto& chunk = sch_vars->chunks[readyToWriteIndex];
+                        chunk.index = kReadyToRead;
+                        sch_vars->cv.notify_one();
+                        readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
+                    }
+                    if (readyToWriteIndex == kNotFound) {
+                        sch_vars->cv.wait(lock, [&readyToWriteIndex, &chunkIndex, sch_vars] {
+                            readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
+                            return kNotFound != readyToWriteIndex;
+                            });
+                    }
+                    ++chunkIndex;
                 }
-
-                output_file.write(sch_vars->buf[buf_cons], sch_vars->actual_size);
-                buf_cons ^= 0x01;
-                
-                if (sch_vars->creator_finish) break;
+                auto& chunk = sch_vars->chunks[readyToWriteIndex];
+                output_file.write(chunk.data.data(), chunk.size);
+                if (chunk.size != kChunkSize) {
+                    break;
+                }
             }
 
-            sch_vars->user_finish = true;
+
+
+
+
+            {  //user ends and sends signal to creator
+                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                sch_vars->finish = true;
+                sch_vars->cv.notify_one();
+            }
 
             std::cout << "USER: FINISHED" << std::endl;
         }
