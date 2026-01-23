@@ -116,6 +116,7 @@ int main(int argc, char* argv[])
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
         //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
 
+
         if (role == static_cast<unsigned int>(Role::CREATOR)) {
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
             new (&shm->vars) SharedVars;
