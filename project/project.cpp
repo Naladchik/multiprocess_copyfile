@@ -123,10 +123,12 @@ int main(int argc, char* argv[])
         unique_ptr<ip::shared_memory_object> shm_obj_ptr;
         int mem_role, file_role;
         SharedVars* sch_vars;
+        SharedMemoryLayout* shm;
         const auto& mem_name = vm["memory"].as<string>();
 		bool try_to_join = true;
 
-        // -------------- loop for testing memory and current situation -----------        
+        // -------------- loop for testing memory and current situation -----------
+        once_again:
             // memory is created or opened if already exists
             try {
                 shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
@@ -140,14 +142,13 @@ int main(int argc, char* argv[])
                 mem_role = static_cast<unsigned int>(Role::USER);
                 std::cout << "USER: STARTED" << endl;
             }
-        //do {
+
             ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
             //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
         
 
             if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {                
-                new (&shm->vars) SharedVars;
+                shm = new (region.get_address()) SharedMemoryLayout;
                 shm->ready.store(true, memory_order_release);
                 sch_vars = &shm->vars;
                 sch_vars->set_source(vm["source"].as<string>());
@@ -156,6 +157,7 @@ int main(int argc, char* argv[])
                 try_to_join = false;
             }
             else {
+                shm = static_cast<SharedMemoryLayout*>(region.get_address());
                 while (!shm->ready.load(memory_order_acquire)) {}
                 sch_vars = &shm->vars;
                 if (!(sch_vars->compare_source(vm["source"].as<string>()) && sch_vars->compare_destination(vm["destination"].as<string>()))) {
@@ -165,8 +167,11 @@ int main(int argc, char* argv[])
                 file_role = static_cast<unsigned int>(Role::WRITER);
                 try_to_join = false;
             }
-            //if(try_to_join) this_thread::sleep_for(chrono::milliseconds(500));			
-        //}while(false);
+            if (try_to_join) {
+                this_thread::sleep_for(chrono::milliseconds(500));
+                goto once_again;
+            }
+        
 
         // -------------- fork READER-WRITER with two loops inside ----------------
 		if (file_role == static_cast<unsigned int>(Role::READER)) {  // READER
