@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <chrono>
 #include <thread>
 #include <boost/program_options.hpp>
@@ -35,7 +35,7 @@ struct DataChunk {
 
 class SharedVars {
 public:
-    std::atomic<bool> initialized = false;
+    atomic<bool> initialized = false;
     ip::interprocess_mutex mtx;
     ip::interprocess_condition cv;
 
@@ -64,9 +64,9 @@ int main(int argc, char* argv[])
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "produce help message")
-        ("source", po::value<std::string>(), "set file to copy from")
-        ("destination", po::value<std::string>(), "set file to copy to")
-        ("memory", po::value<std::string>(), "name of shared memory object")
+        ("source", po::value<string>(), "set file to copy from")
+        ("destination", po::value<string>(), "set file to copy to")
+        ("memory", po::value<string>(), "name of shared memory object")
         ;
 
     po::variables_map vm;
@@ -74,53 +74,51 @@ int main(int argc, char* argv[])
     po::notify(vm);
 
     if (vm.count("help")) { // [m] vm. contains is supposed to be here
-        std::cout << desc << std::endl;
+        cout << desc << endl;
         return 1;
     }
 
     if (!vm.count("source")) {
-        std::cout << "Source file was not set." << std::endl;
+        cout << "Source file was not set." << endl;
     }
     else if (!vm.count("destination")) {
-        std::cout << "Destination file was not set." << std::endl;
+        cout << "Destination file was not set." << endl;
     }
     else if (!vm.count("memory")) {
-        std::cout << "Memory name was not set." << std::endl;
+        cout << "Memory name was not set." << endl;
     }
     else {
-        /*std::cout << "Source: " << vm["source"].as<std::string>() << std::endl;
-        std::cout << "Destination: " << vm["destination"].as<std::string>() << std::endl;
-        std::cout << "Memory: " << vm["memory"].as<std::string>() << std::endl;*/
+        /*cout << "Source: " << vm["source"].as<string>() << endl;
+        cout << "Destination: " << vm["destination"].as<string>() << endl;
+        cout << "Memory: " << vm["memory"].as<string>() << endl;*/
 
         // ============== MAIN LOGIC IS HERE ======================================
-        std::unique_ptr<ip::shared_memory_object> shm_obj_ptr;
+        unique_ptr<ip::shared_memory_object> shm_obj_ptr;
 
         int role;
 
-        const auto& mem_name = vm["memory"].as<std::string>();
+        const auto& mem_name = vm["memory"].as<string>();
 
         // memory is created or opened if already exists
         try {
-            shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
+            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
             shm_obj_ptr->truncate(sizeof(SharedMemoryLayout)); // [f] sizeof(SharedVars)
             role = static_cast<unsigned int>(Role::CREATOR);
-            std::cout << "CREATOR: STARTED" << std::endl;
+            cout << "CREATOR: STARTED" << endl;
         }
         catch (const ip::interprocess_exception&) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));  //workaround for unknown yet issue
-            shm_obj_ptr = std::make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
+            this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
+            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
             role = static_cast<unsigned int>(Role::USER);
-            std::cout << "USER: STARTED" << std::endl;
+            cout << "USER: STARTED" << endl;
         }
 
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-        //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-
 
         if (role == static_cast<unsigned int>(Role::CREATOR)) {
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
             new (&shm->vars) SharedVars;
-            shm->ready.store(true, std::memory_order_release);
+            shm->ready.store(true, memory_order_release);
 
             SharedVars* sch_vars = &shm->vars;
 
@@ -142,7 +140,7 @@ int main(int argc, char* argv[])
                         break;
                     }
                     if (kNotFound == readyToReadIndex) {
-                        if (!sch_vars->cv.wait_for(lock, std::chrono::seconds(10), [&readyToReadIndex, sch_vars] {
+                        if (!sch_vars->cv.wait_for(lock, chrono::seconds(10), [&readyToReadIndex, sch_vars] {
                             readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
                             return kNotFound != readyToReadIndex;
                             })) {
@@ -160,14 +158,14 @@ int main(int argc, char* argv[])
 
         stop:
             ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-            std::cout << "CREATOR: FINISHED" << std::endl;
+            cout << "CREATOR: FINISHED" << endl;
         }
         else { // role == USER
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
-            while (!shm->ready.load(std::memory_order_acquire)) {}
+            while (!shm->ready.load(memory_order_acquire)) {}
             SharedVars* sch_vars = &shm->vars;
 
-            std::ofstream output_file(vm["destination"].as<std::string>(), std::ios::binary);
+            ofstream output_file(vm["destination"].as<string>(), ios::binary);
 
             int chunkIndex{ kReadyToRead + 1 };
             int readyToWriteIndex{ kNotFound };
@@ -202,7 +200,7 @@ int main(int argc, char* argv[])
                 sch_vars->cv.notify_one();
             }
 
-            std::cout << "USER: FINISHED" << std::endl;
+            cout << "USER: FINISHED" << endl;
         }
     }
 
