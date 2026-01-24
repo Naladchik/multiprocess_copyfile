@@ -39,12 +39,15 @@ struct DataChunk {
 
 class SharedVars {
 public:
-    atomic<bool> initialized = false;
     ip::interprocess_mutex mtx;
     ip::interprocess_condition cv;
 
+    bool finish = false;
+	bool ongoing = false;
+
     array<char, kStringMaxSize> source;
 	array<char, kStringMaxSize> destination;
+
 
     void set_source(const string& src) {
         strncpy(source.data(), src.c_str(), kStringMaxSize - 1);
@@ -73,9 +76,7 @@ public:
             }
         }
         return kNotFound;
-    }
-
-    bool finish = false;
+    }    
 };
 
 struct SharedMemoryLayout {
@@ -118,51 +119,57 @@ int main(int argc, char* argv[])
         cout << "Memory: " << vm["memory"].as<string>() << endl;*/
 
         // ============== MAIN LOGIC IS HERE ======================================
+
         unique_ptr<ip::shared_memory_object> shm_obj_ptr;
-
         int mem_role, file_role;
-
-        const auto& mem_name = vm["memory"].as<string>();
-
-        // memory is created or opened if already exists
-        try {
-            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-            shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
-            mem_role = static_cast<unsigned int>(Role::CREATOR);
-            std::cout << "CREATOR: STARTED" << endl;
-        }
-        catch (const ip::interprocess_exception&) {
-            this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
-            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
-            mem_role = static_cast<unsigned int>(Role::USER);
-            std::cout << "USER: STARTED" << endl;
-        }
-
-        ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-
         SharedVars* sch_vars;
+        const auto& mem_name = vm["memory"].as<string>();
+		bool try_to_join = true;
 
-        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+        // -------------- loop for testing memory and current situation -----------        
+            // memory is created or opened if already exists
+            try {
+                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
+                shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
+                mem_role = static_cast<unsigned int>(Role::CREATOR);
+                std::cout << "CREATOR: STARTED" << endl;
+            }
+            catch (const ip::interprocess_exception&) {
+                this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
+                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
+                mem_role = static_cast<unsigned int>(Role::USER);
+                std::cout << "USER: STARTED" << endl;
+            }
+        //do {
+            ip::mapped_region region(*shm_obj_ptr, ip::read_write);
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
-            new (&shm->vars) SharedVars;
-            shm->ready.store(true, memory_order_release);
-            sch_vars = &shm->vars;
-            sch_vars->set_source(vm["source"].as<string>());
-            sch_vars->set_destination(vm["destination"].as<string>());
-            file_role = static_cast<unsigned int>(Role::READER);
-        }
-        else{
-            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
-            while (!shm->ready.load(memory_order_acquire)) {}
-            sch_vars = &shm->vars;
-            if (!(sch_vars->compare_source(vm["source"].as<string>()) && sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                std::cout << "Pair source-destination mismatch." << endl;
-                return 0;
-            }            
-			file_role = static_cast<unsigned int>(Role::WRITER);
-		}
+            //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+        
 
-        if (file_role == static_cast<unsigned int>(Role::READER)) {
+            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {                
+                new (&shm->vars) SharedVars;
+                shm->ready.store(true, memory_order_release);
+                sch_vars = &shm->vars;
+                sch_vars->set_source(vm["source"].as<string>());
+                sch_vars->set_destination(vm["destination"].as<string>());
+                file_role = static_cast<unsigned int>(Role::READER);
+                try_to_join = false;
+            }
+            else {
+                while (!shm->ready.load(memory_order_acquire)) {}
+                sch_vars = &shm->vars;
+                if (!(sch_vars->compare_source(vm["source"].as<string>()) && sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                    std::cout << "Pair source-destination mismatch." << endl;
+                    return 0;
+                }
+                file_role = static_cast<unsigned int>(Role::WRITER);
+                try_to_join = false;
+            }
+            //if(try_to_join) this_thread::sleep_for(chrono::milliseconds(500));			
+        //}while(false);
+
+        // -------------- fork READER-WRITER with two loops inside ----------------
+		if (file_role == static_cast<unsigned int>(Role::READER)) {  // READER
             ifstream input_file(vm["source"].as<string>(), ios::binary);
 
             size_t chunkIndex{ kReadyToRead };
@@ -192,7 +199,7 @@ int main(int argc, char* argv[])
                 }
             }            
         }
-        else { // file_role == WRITER
+        else {  // WRITER
             ofstream output_file(vm["destination"].as<string>(), ios::binary);
 
             int chunkIndex{ kReadyToRead + 1 };
