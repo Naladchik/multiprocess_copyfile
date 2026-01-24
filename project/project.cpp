@@ -140,21 +140,29 @@ int main(int argc, char* argv[])
 
         ip::mapped_region region(*shm_obj_ptr, ip::read_write);
 
-        if(mem_role == static_cast<unsigned int>(Role::CREATOR))
-			file_role = static_cast<unsigned int>(Role::READER);
-        else
-			file_role = static_cast<unsigned int>(Role::WRITER);
+        SharedVars* sch_vars;
 
-        if (file_role == static_cast<unsigned int>(Role::READER)) {
+        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
             new (&shm->vars) SharedVars;
             shm->ready.store(true, memory_order_release);
+            sch_vars = &shm->vars;
+            sch_vars->set_source(vm["source"].as<string>());
+            sch_vars->set_destination(vm["destination"].as<string>());
+            file_role = static_cast<unsigned int>(Role::READER);
+        }
+        else{
+            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
+            while (!shm->ready.load(memory_order_acquire)) {}
+            sch_vars = &shm->vars;
+            if (!(sch_vars->compare_source(vm["source"].as<string>()) && sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                std::cout << "Pair source-destination mismatch." << endl;
+                return 0;
+            }            
+			file_role = static_cast<unsigned int>(Role::WRITER);
+		}
 
-            SharedVars* sch_vars = &shm->vars;
-
-			sch_vars->set_source(vm["source"].as<string>());
-			sch_vars->set_destination(vm["destination"].as<string>());
-
+        if (file_role == static_cast<unsigned int>(Role::READER)) {
             ifstream input_file(vm["source"].as<string>(), ios::binary);
 
             size_t chunkIndex{ kReadyToRead };
@@ -182,30 +190,9 @@ int main(int argc, char* argv[])
                         }
                     }
                 }
-            }
-
-            {  // wait until user ends
-                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
-            }
-
-        stop:
-            ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-            std::cout << "CREATOR: FINISHED" << endl;
+            }            
         }
         else { // file_role == WRITER
-            SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
-            while (!shm->ready.load(memory_order_acquire)) {}
-            SharedVars* sch_vars = &shm->vars;
-
-            if (sch_vars->compare_source(vm["source"].as<string>())) {
-                std::cout << "Source match." << endl;
-            }
-
-            if (sch_vars->compare_destination(vm["destination"].as<string>())) {
-                std::cout << "Destination match." << endl;
-			}
-
             ofstream output_file(vm["destination"].as<string>(), ios::binary);
 
             int chunkIndex{ kReadyToRead + 1 };
@@ -232,9 +219,19 @@ int main(int argc, char* argv[])
                 if (chunk.size != kChunkSize) {
                     break;
                 }
+            }            
+        }
+
+        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+            {  // wait until user ends
+                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
             }
-
-
+        stop:
+            ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+            std::cout << "CREATOR: FINISHED" << endl;
+        }
+        else {
             {  //user ends and sends signal to creator
                 ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
                 sch_vars->finish = true;
