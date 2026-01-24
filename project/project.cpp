@@ -21,6 +21,8 @@ constexpr uint16_t kChunkSize{ 0xffff };
 constexpr int kNotFound{ -1 };
 constexpr streamsize kReadyToRead{ 0 };
 
+constexpr uint16_t kStringMaxSize{ 256 };
+
 enum class Role : unsigned int {
     CREATOR = 0,
     USER = 1,
@@ -40,6 +42,27 @@ public:
     atomic<bool> initialized = false;
     ip::interprocess_mutex mtx;
     ip::interprocess_condition cv;
+
+    array<char, kStringMaxSize> source;
+	array<char, kStringMaxSize> destination;
+
+    void set_source(const string& src) {
+        strncpy(source.data(), src.c_str(), kStringMaxSize - 1);
+        source[kStringMaxSize - 1] = '\0';
+	}
+
+    void set_destination(const string& dest) {
+        strncpy(destination.data(), dest.c_str(), kStringMaxSize - 1);
+		destination[kStringMaxSize - 1] = '\0';
+	}
+
+    bool compare_source(const string& src) {
+        return strncmp(source.data(), src.c_str(), kStringMaxSize) == 0;
+	}
+
+    bool compare_destination(const string& dest) {
+		return strncmp(destination.data(), dest.c_str(), kStringMaxSize) == 0;
+	}
 
     array<DataChunk, kChunksCount> chunks;
 
@@ -129,6 +152,9 @@ int main(int argc, char* argv[])
 
             SharedVars* sch_vars = &shm->vars;
 
+			sch_vars->set_source(vm["source"].as<string>());
+			sch_vars->set_destination(vm["destination"].as<string>());
+
             ifstream input_file(vm["source"].as<string>(), ios::binary);
 
             size_t chunkIndex{ kReadyToRead };
@@ -171,6 +197,14 @@ int main(int argc, char* argv[])
             SharedMemoryLayout* shm = static_cast<SharedMemoryLayout*>(region.get_address());
             while (!shm->ready.load(memory_order_acquire)) {}
             SharedVars* sch_vars = &shm->vars;
+
+            if (sch_vars->compare_source(vm["source"].as<string>())) {
+                std::cout << "Source match." << endl;
+            }
+
+            if (sch_vars->compare_destination(vm["destination"].as<string>())) {
+                std::cout << "Destination match." << endl;
+			}
 
             ofstream output_file(vm["destination"].as<string>(), ios::binary);
 
