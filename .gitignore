@@ -5,3 +5,4 @@ project/.vs/
 project/build/
 project/out/
 share/
+*.txt
