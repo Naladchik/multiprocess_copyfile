@@ -126,6 +126,7 @@ int main(int argc, char* argv[])
         SharedMemoryLayout* shm;
         const auto& mem_name = vm["memory"].as<string>();
 		bool try_to_join = true;
+		uint16_t attemts = 20;
 
         // -------------- loop for testing memory and current situation -----------
         once_again:
@@ -134,13 +135,13 @@ int main(int argc, char* argv[])
                 shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
                 shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
                 mem_role = static_cast<unsigned int>(Role::CREATOR);
-                std::cout << "CREATOR: STARTED" << endl;
+                //std::cout << "CREATOR: STARTED" << endl;
             }
             catch (const ip::interprocess_exception&) {
                 this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
                 shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
                 mem_role = static_cast<unsigned int>(Role::USER);
-                std::cout << "USER: STARTED" << endl;
+                //std::cout << "USER: STARTED" << endl;
             }
 
             ip::mapped_region region(*shm_obj_ptr, ip::read_write);
@@ -151,21 +152,40 @@ int main(int argc, char* argv[])
                 shm = new (region.get_address()) SharedMemoryLayout;
                 shm->ready.store(true, memory_order_release);
                 sch_vars = &shm->vars;
-                sch_vars->set_source(vm["source"].as<string>());
-                sch_vars->set_destination(vm["destination"].as<string>());
+                {
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    sch_vars->set_source(vm["source"].as<string>());
+                    sch_vars->set_destination(vm["destination"].as<string>());
+                }
                 file_role = static_cast<unsigned int>(Role::READER);
                 try_to_join = false;
+                std::cout << "CREATOR: STARTED" << endl;
             }
             else {
                 shm = static_cast<SharedMemoryLayout*>(region.get_address());
                 while (!shm->ready.load(memory_order_acquire)) {}
                 sch_vars = &shm->vars;
-                if (!(sch_vars->compare_source(vm["source"].as<string>()) && sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                    std::cout << "Pair source-destination mismatch." << endl;
-                    return 0;
+                {
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);                    
+                    if (!sch_vars->ongoing) {
+                        if ((sch_vars->compare_source(vm["source"].as<string>()) && 
+                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                            sch_vars->ongoing = true;
+                            try_to_join = false;
+                            std::cout << "USER: STARTED" << endl;
+                        }						
+                    }
+                    else {
+                        if ((!sch_vars->compare_source(vm["source"].as<string>()) && 
+                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                            std::cout << "such source-destination is in progress. exit." << endl;
+							return 0;
+                        }
+						if (attemts == 0) return 0;
+                        attemts--;
+                    }
                 }
-                file_role = static_cast<unsigned int>(Role::WRITER);
-                try_to_join = false;
+                file_role = static_cast<unsigned int>(Role::WRITER);                
             }
             if (try_to_join) {
                 this_thread::sleep_for(chrono::milliseconds(500));
