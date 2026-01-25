@@ -166,23 +166,31 @@ int main(int argc, char* argv[])
                 while (!shm->ready.load(memory_order_acquire)) {}
                 sch_vars = &shm->vars;
                 {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);                    
-                    if (!sch_vars->ongoing) {
-                        if ((sch_vars->compare_source(vm["source"].as<string>()) && 
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    if (sch_vars->ongoing) {                        
+                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
+                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                            std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
+                            return 0;
+                        }
+                        else {
+                            if (attemts == 0) return 0;
+                            std::cout << "NEW: ONE MORE TRY (ONGOING)" << endl;
+                            attemts--;
+                        }
+                    }
+                    else {
+                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
                             sch_vars->compare_destination(vm["destination"].as<string>()))) {
                             sch_vars->ongoing = true;
                             try_to_join = false;
                             std::cout << "USER: STARTED" << endl;
-                        }						
-                    }
-                    else {
-                        if ((!sch_vars->compare_source(vm["source"].as<string>()) && 
-                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                            std::cout << "such source-destination is in progress. exit." << endl;
-							return 0;
                         }
-						if (attemts == 0) return 0;
-                        attemts--;
+                        else {
+                            if (attemts == 0) return 0;
+                            std::cout << "NEW: ONE MORE TRY (ALONE)" << endl;
+                            attemts--;
+                        }
                     }
                 }
                 file_role = static_cast<unsigned int>(Role::WRITER);                
