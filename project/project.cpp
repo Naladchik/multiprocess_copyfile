@@ -175,7 +175,7 @@ int main(int argc, char* argv[])
                         }
                         else {
                             if (attemts == 0) return 0;
-                            std::cout << "NEW: ONE MORE TRY (ONGOING)" << endl;
+                            std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
                             attemts--;
                         }
                     }
@@ -188,7 +188,7 @@ int main(int argc, char* argv[])
                         }
                         else {
                             if (attemts == 0) return 0;
-                            std::cout << "NEW: ONE MORE TRY (ALONE)" << endl;
+                            std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
                             attemts--;
                         }
                     }
