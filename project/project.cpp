@@ -25,9 +25,7 @@ constexpr uint16_t kStringMaxSize{ 256 };
 
 enum class Role : unsigned int {
     CREATOR = 0,
-    USER = 1,
-    READER = 2,
-    WRITER = 3
+    USER = 1
 };
 
 
@@ -125,163 +123,160 @@ int main(int argc, char* argv[])
         // ============== MAIN LOGIC IS HERE ======================================
 
         unique_ptr<ip::shared_memory_object> shm_obj_ptr;
-        int mem_role, file_role;
+        int mem_role;
         SharedVars* sch_vars;
         SharedMemoryLayout* shm;
         const auto& mem_name = vm["memory"].as<string>();
         bool try_to_join = true;
+		bool wait_for_user = true;
         uint16_t attemts = 20;
 
         // -------------- loop for testing memory and current situation -----------
-    once_again:
-        // memory is created or opened if already exists
-        try {
-            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-            shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
-            mem_role = static_cast<unsigned int>(Role::CREATOR);
-        }
-        catch (const ip::interprocess_exception&) {
-            this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
-            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
-            mem_role = static_cast<unsigned int>(Role::USER);
-        }
-
-        ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-        //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-
-
-        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
-            shm = new (region.get_address()) SharedMemoryLayout;
-            sch_vars = &shm->vars;
-            {
-                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                sch_vars->set_source(vm["source"].as<string>());
-                sch_vars->set_destination(vm["destination"].as<string>());
+        while (true) {
+            // memory is created or opened if already exists
+            try {
+                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
+                shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
+                mem_role = static_cast<unsigned int>(Role::CREATOR);
             }
-            file_role = static_cast<unsigned int>(Role::READER);
-            try_to_join = false;
-            std::cout << "CREATOR: STARTED" << endl;
-        }
-        else {
-            shm = static_cast<SharedMemoryLayout*>(region.get_address());
-            while (!shm->ready.load(memory_order_acquire)) {}
-            sch_vars = &shm->vars;
-            {
-                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                if (sch_vars->ongoing) {
-                    if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                        sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                        std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
-                        return 0;
-                    }
-                    else {
-                        if (attemts == 0) return 0;
-                        std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
-                        attemts--;
-                    }
-                }
-                else {
-                    if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                        sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                        sch_vars->ongoing = true;
-                        try_to_join = false;
-                        std::cout << "USER: STARTED" << endl;
-                    }
-                    else {
-                        if (attemts == 0) return 0;
-                        std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
-                        attemts--;
-                    }
-                }
+            catch (const ip::interprocess_exception&) {
+                this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
+                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
+                mem_role = static_cast<unsigned int>(Role::USER);
             }
-            file_role = static_cast<unsigned int>(Role::WRITER);
-        }
-        if (try_to_join) {
-            this_thread::sleep_for(chrono::milliseconds(500));
-            goto once_again;
-        }
 
+            ip::mapped_region region(*shm_obj_ptr, ip::read_write);
+            //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
 
-        // -------------- fork READER-WRITER with two loops inside ----------------
-        if (file_role == static_cast<unsigned int>(Role::READER)) {  // READER
-            ifstream input_file(vm["source"].as<string>(), ios::binary);
-
-            size_t chunkIndex{ kReadyToRead };
-            size_t readyToReadIndex{ 0 };
-
-            while (true) {
-                auto& chunk = sch_vars->chunks[readyToReadIndex];
-                input_file.read(chunk.data.data(), kChunkSize);
-                chunk.size = input_file.gcount();
+            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+                shm = new (region.get_address()) SharedMemoryLayout;
+                sch_vars = &shm->vars;
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    chunk.index = ++chunkIndex;
-                    readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
-                    sch_vars->cv.notify_one();
-                    if (chunk.size != kChunkSize) {
-                        break;
+                    sch_vars->set_source(vm["source"].as<string>());
+                    sch_vars->set_destination(vm["destination"].as<string>());
+                }
+                try_to_join = false;
+                std::cout << "CREATOR: STARTED" << endl;
+            }
+            else {
+                shm = static_cast<SharedMemoryLayout*>(region.get_address());
+                while (!shm->ready.load(memory_order_acquire)) {}
+                sch_vars = &shm->vars;
+                {
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    if (sch_vars->ongoing) {
+                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
+                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                            std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
+                            return 0;
+                        }
+                        else {
+                            if (attemts == 0) return 0;
+                            std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
+                            attemts--;
+                        }
                     }
-                    if (kNotFound == readyToReadIndex) {
-                        if (!sch_vars->cv.wait_for(lock, chrono::seconds(10), [&readyToReadIndex, sch_vars] {
-                            readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
-                            return kNotFound != readyToReadIndex;
-                            })) {
-                            std::cout << "Timeout: No notification within 10 seconds." << endl;
-                            goto stop;
+                    else {
+                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
+                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                            sch_vars->ongoing = true;
+                            try_to_join = false;
+                            std::cout << "USER: STARTED" << endl;
+                        }
+                        else {
+                            if (attemts == 0) return 0;
+                            std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
+                            attemts--;
                         }
                     }
                 }
             }
-        }
-        else {  // WRITER
-            ofstream output_file(vm["destination"].as<string>(), ios::binary);
+            if (try_to_join) {
+                this_thread::sleep_for(chrono::milliseconds(500));
+                continue;
+            }
 
-            int chunkIndex{ kReadyToRead + 1 };
-            int readyToWriteIndex{ kNotFound };
-            while (true) {
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    if (readyToWriteIndex != kNotFound) {
-                        auto& chunk = sch_vars->chunks[readyToWriteIndex];
-                        chunk.index = kReadyToRead;
+            // -------------- fork READER-WRITER with two loops inside ----------------
+            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {  // CREATOR
+                ifstream input_file(vm["source"].as<string>(), ios::binary);
+
+                size_t chunkIndex{ kReadyToRead };
+                size_t readyToReadIndex{ 0 };
+
+                while (true) {
+                    auto& chunk = sch_vars->chunks[readyToReadIndex];
+                    input_file.read(chunk.data.data(), kChunkSize);
+                    chunk.size = input_file.gcount();
+                    {
+                        ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                        chunk.index = ++chunkIndex;
+                        readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
                         sch_vars->cv.notify_one();
-                        readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
+                        if (chunk.size != kChunkSize) {
+                            break;
+                        }
+                        if (kNotFound == readyToReadIndex) {
+                            if (!sch_vars->cv.wait_for(lock, chrono::seconds(10), [&readyToReadIndex, sch_vars] {
+                                readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
+                                return kNotFound != readyToReadIndex;
+                                })) {
+                                std::cout << "Timeout: No notification within 10 seconds." << endl;
+                                wait_for_user = false;
+                                break;
+                            }
+                        }
                     }
-                    if (readyToWriteIndex == kNotFound) {
-                        sch_vars->cv.wait(lock, [&readyToWriteIndex, &chunkIndex, sch_vars] {
+                }
+            }
+            else {  // USER
+                ofstream output_file(vm["destination"].as<string>(), ios::binary);
+
+                int chunkIndex{ kReadyToRead + 1 };
+                int readyToWriteIndex{ kNotFound };
+                while (true) {
+                    {
+                        ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                        if (readyToWriteIndex != kNotFound) {
+                            auto& chunk = sch_vars->chunks[readyToWriteIndex];
+                            chunk.index = kReadyToRead;
+                            sch_vars->cv.notify_one();
                             readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
-                            return kNotFound != readyToWriteIndex;
-                            });
+                        }
+                        if (readyToWriteIndex == kNotFound) {
+                            sch_vars->cv.wait(lock, [&readyToWriteIndex, &chunkIndex, sch_vars] {
+                                readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
+                                return kNotFound != readyToWriteIndex;
+                                });
+                        }
+                        ++chunkIndex;
                     }
-                    ++chunkIndex;
+                    auto& chunk = sch_vars->chunks[readyToWriteIndex];
+                    output_file.write(chunk.data.data(), chunk.size);
+                    if (chunk.size != kChunkSize) {
+                        break;
+                    }
                 }
-                auto& chunk = sch_vars->chunks[readyToWriteIndex];
-                output_file.write(chunk.data.data(), chunk.size);
-                if (chunk.size != kChunkSize) {
-                    break;
-                }
-            }
-        }
-
-        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
-            {  // wait until user ends
-                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
-            }
-        stop:
-            ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-            std::cout << "CREATOR: FINISHED" << endl;
-        }
-        else {
-            {  //user ends and sends signal to creator
-                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                sch_vars->finish = true;
-                sch_vars->cv.notify_one();
             }
 
-            std::cout << "USER: FINISHED" << endl;
+            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+                if(wait_for_user){  // wait until user ends
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
+                }
+                ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+                std::cout << "CREATOR: FINISHED" << endl;
+            }
+            else {
+                {  //user ends and sends signal to creator
+                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                    sch_vars->finish = true;
+                    sch_vars->cv.notify_one();
+                }
+
+                std::cout << "USER: FINISHED" << endl;
+            }
+            break;
         }
     }
-
-    return 0;
 }
