@@ -43,29 +43,33 @@ public:
     ip::interprocess_condition cv;
 
     bool finish = false;
-	bool ongoing = false;
+    bool ongoing = false;
 
-    array<char, kStringMaxSize> source;
-	array<char, kStringMaxSize> destination;
+    array<char, kStringMaxSize> source{ 0 };
+    array<char, kStringMaxSize> destination{ 0 };
 
 
     void set_source(const string& src) {
-        strncpy(source.data(), src.c_str(), kStringMaxSize - 1);
-        source[kStringMaxSize - 1] = '\0';
-	}
+        for (uint16_t i = 0; src[i] != '\0'; i++) {
+			source[i] = src[i];
+        }
+    }
 
     void set_destination(const string& dest) {
-        strncpy(destination.data(), dest.c_str(), kStringMaxSize - 1);
-		destination[kStringMaxSize - 1] = '\0';
-	}
+        for (uint16_t i = 0; dest[i] != '\0'; i++) {
+            destination[i] = dest[i];
+        }
+    }
 
     bool compare_source(const string& src) {
+        // namespace std has no member string_view (some known problem)
         return strncmp(source.data(), src.c_str(), kStringMaxSize) == 0;
-	}
+    }
 
     bool compare_destination(const string& dest) {
-		return strncmp(destination.data(), dest.c_str(), kStringMaxSize) == 0;
-	}
+        // namespace std has no member string_view (some known problem)
+        return strncmp(destination.data(), dest.c_str(), kStringMaxSize) == 0;
+    }
 
     array<DataChunk, kChunksCount> chunks;
 
@@ -76,11 +80,11 @@ public:
             }
         }
         return kNotFound;
-    }    
+    }
 };
 
 struct SharedMemoryLayout {
-    atomic<bool> ready;
+    atomic<bool> ready{true};
     SharedVars vars;
 };
 
@@ -125,84 +129,81 @@ int main(int argc, char* argv[])
         SharedVars* sch_vars;
         SharedMemoryLayout* shm;
         const auto& mem_name = vm["memory"].as<string>();
-		bool try_to_join = true;
-		uint16_t attemts = 20;
+        bool try_to_join = true;
+        uint16_t attemts = 20;
 
         // -------------- loop for testing memory and current situation -----------
-        once_again:
-            // memory is created or opened if already exists
-            try {
-                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-                shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
-                mem_role = static_cast<unsigned int>(Role::CREATOR);
-                //std::cout << "CREATOR: STARTED" << endl;
-            }
-            catch (const ip::interprocess_exception&) {
-                this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
-                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
-                mem_role = static_cast<unsigned int>(Role::USER);
-                //std::cout << "USER: STARTED" << endl;
-            }
+    once_again:
+        // memory is created or opened if already exists
+        try {
+            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
+            shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
+            mem_role = static_cast<unsigned int>(Role::CREATOR);
+        }
+        catch (const ip::interprocess_exception&) {
+            this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
+            shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
+            mem_role = static_cast<unsigned int>(Role::USER);
+        }
 
-            ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-            //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
-        
+        ip::mapped_region region(*shm_obj_ptr, ip::read_write);
+        //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
 
-            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {                
-                shm = new (region.get_address()) SharedMemoryLayout;
-                shm->ready.store(true, memory_order_release);
-                sch_vars = &shm->vars;
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->set_source(vm["source"].as<string>());
-                    sch_vars->set_destination(vm["destination"].as<string>());
-                }
-                file_role = static_cast<unsigned int>(Role::READER);
-                try_to_join = false;
-                std::cout << "CREATOR: STARTED" << endl;
+
+        if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+            shm = new (region.get_address()) SharedMemoryLayout;
+            sch_vars = &shm->vars;
+            {
+                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                sch_vars->set_source(vm["source"].as<string>());
+                sch_vars->set_destination(vm["destination"].as<string>());
             }
-            else {
-                shm = static_cast<SharedMemoryLayout*>(region.get_address());
-                while (!shm->ready.load(memory_order_acquire)) {}
-                sch_vars = &shm->vars;
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    if (sch_vars->ongoing) {                        
-                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                            std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
-                            return 0;
-                        }
-                        else {
-                            if (attemts == 0) return 0;
-                            std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
-                            attemts--;
-                        }
+            file_role = static_cast<unsigned int>(Role::READER);
+            try_to_join = false;
+            std::cout << "CREATOR: STARTED" << endl;
+        }
+        else {
+            shm = static_cast<SharedMemoryLayout*>(region.get_address());
+            while (!shm->ready.load(memory_order_acquire)) {}
+            sch_vars = &shm->vars;
+            {
+                ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
+                if (sch_vars->ongoing) {
+                    if ((sch_vars->compare_source(vm["source"].as<string>()) &&
+                        sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                        std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
+                        return 0;
                     }
                     else {
-                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
-                            sch_vars->ongoing = true;
-                            try_to_join = false;
-                            std::cout << "USER: STARTED" << endl;
-                        }
-                        else {
-                            if (attemts == 0) return 0;
-                            std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
-                            attemts--;
-                        }
+                        if (attemts == 0) return 0;
+                        std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
+                        attemts--;
                     }
                 }
-                file_role = static_cast<unsigned int>(Role::WRITER);                
+                else {
+                    if ((sch_vars->compare_source(vm["source"].as<string>()) &&
+                        sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                        sch_vars->ongoing = true;
+                        try_to_join = false;
+                        std::cout << "USER: STARTED" << endl;
+                    }
+                    else {
+                        if (attemts == 0) return 0;
+                        std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
+                        attemts--;
+                    }
+                }
             }
-            if (try_to_join) {
-                this_thread::sleep_for(chrono::milliseconds(500));
-                goto once_again;
-            }
-        
+            file_role = static_cast<unsigned int>(Role::WRITER);
+        }
+        if (try_to_join) {
+            this_thread::sleep_for(chrono::milliseconds(500));
+            goto once_again;
+        }
+
 
         // -------------- fork READER-WRITER with two loops inside ----------------
-		if (file_role == static_cast<unsigned int>(Role::READER)) {  // READER
+        if (file_role == static_cast<unsigned int>(Role::READER)) {  // READER
             ifstream input_file(vm["source"].as<string>(), ios::binary);
 
             size_t chunkIndex{ kReadyToRead };
@@ -230,7 +231,7 @@ int main(int argc, char* argv[])
                         }
                     }
                 }
-            }            
+            }
         }
         else {  // WRITER
             ofstream output_file(vm["destination"].as<string>(), ios::binary);
@@ -259,7 +260,7 @@ int main(int argc, char* argv[])
                 if (chunk.size != kChunkSize) {
                     break;
                 }
-            }            
+            }
         }
 
         if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
