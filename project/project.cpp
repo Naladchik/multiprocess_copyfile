@@ -4,6 +4,8 @@
 #include <boost/program_options.hpp>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
+#include <algorithm>
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
@@ -45,29 +47,6 @@ public:
 
     array<char, kStringMaxSize> source{ 0 };
     array<char, kStringMaxSize> destination{ 0 };
-
-
-    void set_source(const string& src) {
-        for (uint16_t i = 0; src[i] != '\0'; i++) {
-			source[i] = src[i];
-        }
-    }
-
-    void set_destination(const string& dest) {
-        for (uint16_t i = 0; dest[i] != '\0'; i++) {
-            destination[i] = dest[i];
-        }
-    }
-
-    bool compare_source(const string& src) {
-        // namespace std has no member string_view (some known problem)
-        return strncmp(source.data(), src.c_str(), kStringMaxSize) == 0;
-    }
-
-    bool compare_destination(const string& dest) {
-        // namespace std has no member string_view (some known problem)
-        return strncmp(destination.data(), dest.c_str(), kStringMaxSize) == 0;
-    }
 
     array<DataChunk, kChunksCount> chunks;
 
@@ -153,8 +132,8 @@ int main(int argc, char* argv[])
                 sch_vars = &shm->vars;
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->set_source(vm["source"].as<string>());
-                    sch_vars->set_destination(vm["destination"].as<string>());
+                    copy(vm["source"].as<string>().begin(), vm["source"].as<string>().end(), sch_vars->source.begin());
+					copy(vm["destination"].as<string>().begin(), vm["destination"].as<string>().end(), sch_vars->destination.begin());
                 }
                 try_to_join = false;
                 std::cout << "CREATOR: STARTED" << endl;
@@ -166,8 +145,8 @@ int main(int argc, char* argv[])
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
                     if (sch_vars->ongoing) {
-                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                        if (vm["source"].as<string>() == string_view(sch_vars->source.data()) &&
+                            vm["destination"].as<string>() == string_view(sch_vars->destination.data())) {
                             std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
                             return 0;
                         }
@@ -178,8 +157,8 @@ int main(int argc, char* argv[])
                         }
                     }
                     else {
-                        if ((sch_vars->compare_source(vm["source"].as<string>()) &&
-                            sch_vars->compare_destination(vm["destination"].as<string>()))) {
+                        if (vm["source"].as<string>() == string_view(sch_vars->source.data()) &&
+                            vm["destination"].as<string>() == string_view(sch_vars->destination.data())) {
                             sch_vars->ongoing = true;
                             try_to_join = false;
                             std::cout << "USER: STARTED" << endl;
