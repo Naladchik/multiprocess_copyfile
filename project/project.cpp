@@ -109,6 +109,8 @@ int main(int argc, char* argv[])
         bool try_to_join = true;
 		bool wait_for_user = true;
         uint16_t attemts = 20;
+		string src_file = vm["source"].as<string>();
+		string dst_file = vm["destination"].as<string>();
 
         // -------------- loop for testing memory and current situation -----------
         while (true) {
@@ -132,8 +134,8 @@ int main(int argc, char* argv[])
                 sch_vars = &shm->vars;
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    copy(vm["source"].as<string>().begin(), vm["source"].as<string>().end(), sch_vars->source.begin());
-					copy(vm["destination"].as<string>().begin(), vm["destination"].as<string>().end(), sch_vars->destination.begin());
+                    copy(src_file.begin(), src_file.end(), sch_vars->source.begin());
+					copy(dst_file.begin(), dst_file.end(), sch_vars->destination.begin());
                 }
                 try_to_join = false;
                 std::cout << "CREATOR: STARTED" << endl;
@@ -145,8 +147,8 @@ int main(int argc, char* argv[])
                 {
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
                     if (sch_vars->ongoing) {
-                        if (vm["source"].as<string>() == string_view(sch_vars->source.data()) &&
-                            vm["destination"].as<string>() == string_view(sch_vars->destination.data())) {
+                        if (src_file == string_view(sch_vars->source.data()) &&
+                            dst_file == string_view(sch_vars->destination.data())) {
                             std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
                             return 0;
                         }
@@ -157,8 +159,8 @@ int main(int argc, char* argv[])
                         }
                     }
                     else {
-                        if (vm["source"].as<string>() == string_view(sch_vars->source.data()) &&
-                            vm["destination"].as<string>() == string_view(sch_vars->destination.data())) {
+                        if (src_file == string_view(sch_vars->source.data()) &&
+                            dst_file == string_view(sch_vars->destination.data())) {
                             sch_vars->ongoing = true;
                             try_to_join = false;
                             std::cout << "USER: STARTED" << endl;
