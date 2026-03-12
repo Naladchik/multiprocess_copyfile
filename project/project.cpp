@@ -115,6 +115,7 @@ int main(int argc, char* argv[])
         // -------------- loop for testing memory and current situation -----------
         while (true) {
             // memory is created or opened if already exists
+            // role is assigned based on it
             try {
                 shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
                 shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
@@ -130,6 +131,7 @@ int main(int argc, char* argv[])
             //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
 
             if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
+                // file names are written to shared memory
                 shm = new (region.get_address()) SharedMemoryLayout;
                 sch_vars = &shm->vars;
                 {
@@ -141,6 +143,7 @@ int main(int argc, char* argv[])
                 std::cout << "CREATOR: STARTED" << endl;
             }
             else {
+                // analysis and desicion based on files names comparison
                 shm = static_cast<SharedMemoryLayout*>(region.get_address());
                 while (!shm->ready.load(memory_order_acquire)) {}
                 sch_vars = &shm->vars;
@@ -181,6 +184,12 @@ int main(int argc, char* argv[])
             // -------------- fork READER-WRITER with two loops inside ----------------
             if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {  // CREATOR
                 ifstream input_file(vm["source"].as<string>(), ios::binary);
+
+                if(!input_file){
+                    cout << "Failed to open source file." << endl;
+                    ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+                    return 1;
+                }
 
                 size_t chunkIndex{ kReadyToRead };
                 size_t readyToReadIndex{ 0 };
