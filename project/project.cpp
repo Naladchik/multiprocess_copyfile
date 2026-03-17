@@ -64,6 +64,16 @@ public:
     }
 };
 
+class ExploreBehavior {
+public:
+    ExploreBehavior() {
+        cout << "ExploreBehavior: STARTED" << endl;
+    }
+    ~ExploreBehavior() {
+        cout << "ExploreBehavior: STOPPED" << endl;
+    }
+};
+
 struct SharedMemoryLayout {
     atomic<bool> ready{true};
     SharedVars vars;
@@ -116,6 +126,8 @@ int main(int argc, char* argv[])
         uint16_t attemts = 20;
 		string src_file = vm["source"].as<string>();
 		string dst_file = vm["destination"].as<string>();
+
+		ExploreBehavior explore_behavior;
 
         // -------------- loop for testing memory and current situation -----------
         while (true) {
