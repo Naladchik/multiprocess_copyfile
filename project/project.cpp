@@ -6,6 +6,8 @@
 #include <fstream>
 #include <string_view>
 #include <algorithm>
+#include <cstdlib>
+#include <exception>
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 #include <boost/interprocess/sync/interprocess_mutex.hpp>
@@ -13,6 +15,8 @@
 
 using namespace std;
 using namespace std::literals;
+
+string mem_name_str;
 
 namespace po = boost::program_options;
 namespace ip = boost::interprocess;
@@ -106,6 +110,7 @@ int main(int argc, char* argv[])
         SharedVars* sch_vars;
         SharedMemoryLayout* shm;
         const auto& mem_name = vm["memory"].as<string>();
+        mem_name_str = vm["memory"].as<string>();
         bool try_to_join = true;
 		bool wait_for_user = true;
         uint16_t attemts = 20;
@@ -128,7 +133,7 @@ int main(int argc, char* argv[])
             }
 
             ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-            //ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+            //ip::shared_memory_object::remove(mem_name_str.c_str());
 
             if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
                 // file names are written to shared memory
@@ -181,13 +186,20 @@ int main(int argc, char* argv[])
                 continue;
             }
 
+            std::set_terminate([]()
+                {
+                    cout << "Unhandled exception\n" << endl;
+                    ip::shared_memory_object::remove(mem_name_str.c_str());
+                    abort();
+                });
+
             // -------------- fork READER-WRITER with two loops inside ----------------
             if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {  // CREATOR
                 ifstream input_file(vm["source"].as<string>(), ios::binary);
 
                 if(!input_file){
                     cout << "Failed to open source file." << endl;
-                    ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+                    ip::shared_memory_object::remove(mem_name_str.c_str());
                     return 1;
                 }
 
@@ -254,7 +266,7 @@ int main(int argc, char* argv[])
                     ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
                     sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
                 }
-                ip::shared_memory_object::remove(vm["memory"].as<string>().c_str());
+                ip::shared_memory_object::remove(mem_name_str.c_str());
                 std::cout << "CREATOR: FINISHED" << endl;
             }
             else {
