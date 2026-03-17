@@ -209,6 +209,7 @@ int main(int argc, char* argv[])
                 while (true) {
                     auto& chunk = sch_vars->chunks[readyToReadIndex];
                     input_file.read(chunk.data.data(), kChunkSize);
+                    //throw 1;
                     chunk.size = input_file.gcount();
                     {
                         ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
