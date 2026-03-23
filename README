@@ -1,0 +1,8 @@
+Currently the code for experimenting with try, catch, exceptions and terminate function is located at lines:
+    224 - 230
+and commented.
+
+With partial (complete) uncommenting it can be found that:
+1) If only throw command is uncommented, then the custom terminate function will be executed and memory will be successsfully removed.
+2) If the whole try-catch is unommented, then the terminate function will not be executed. ExploreBehavior object's constructor and destructor will be executed both.
+3) If only ExploreBehavior object declaration and throw are left, then constructor will be executed but no destructor. The terminate function is also executed in this case. 

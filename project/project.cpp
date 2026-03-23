@@ -127,7 +127,7 @@ int main(int argc, char* argv[])
 		string src_file = vm["source"].as<string>();
 		string dst_file = vm["destination"].as<string>();
 
-		ExploreBehavior explore_behavior;
+		// ExploreBehavior explore_behavior;
 
         // -------------- loop for testing memory and current situation -----------
         while (true) {
@@ -200,7 +200,7 @@ int main(int argc, char* argv[])
 
             std::set_terminate([]()
                 {
-                    cout << "Unhandled exception\n" << endl;
+                    cout << "Unhandled exception. Memory was removed.\n" << endl;
                     ip::shared_memory_object::remove(mem_name_str.c_str());
                     abort();
                 });
@@ -221,7 +221,13 @@ int main(int argc, char* argv[])
                 while (true) {
                     auto& chunk = sch_vars->chunks[readyToReadIndex];
                     input_file.read(chunk.data.data(), kChunkSize);
-                    //throw 1;
+                    //try{
+                    //    ExploreBehavior explore_behavior;
+                    //    throw 1;
+                    //}
+                    //    catch (int ex_var) {
+                    //    cout << "Error occurred: " << ex_var << endl;
+                    //}
                     chunk.size = input_file.gcount();
                     {
                         ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
