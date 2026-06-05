@@ -1,6 +1,7 @@
 {
   "dependencies": [
     "boost-program-options",
-    "boost-interprocess"
+    "boost-interprocess",
+    "boost-asio"
   ]
 }

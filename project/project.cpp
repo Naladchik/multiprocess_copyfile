@@ -1,303 +1,227 @@
-#include <iostream>
-#include <chrono>
-#include <thread>
+// TCP/IP server-client demo using Boost.Asio (synchronous, educational).
+//
+// One binary, two roles selected via --role server / --role client (-r).
+// The server listens on localhost:12345, accepts one client, and prints
+// every line it receives.  The client connects and forwards stdin lines.
+
+/*
+┌──────────────────┬───────────────────────────────────────────────────┐
+│ Berkeley sockets │               Boost.Asio equivalent               │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ socket()         │ constructing tcp::socket or tcp::acceptor         │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ bind()           │ passing tcp::endpoint to the acceptor constructor │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ listen()         │ also handled inside the acceptor constructor      │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ accept()         │ acceptor.accept(socket)                           │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ connect()        │ boost::asio::connect(socket, endpoints)           │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ send() / write() │ boost::asio::write(socket, buffer)                │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ recv() / read()  │ boost::asio::read_until(socket, buffer, '\n')     │
+├──────────────────┼───────────────────────────────────────────────────┤
+│ close()          │ socket.close()                                    │
+└──────────────────┴───────────────────────────────────────────────────┘
+
+The main differences are :
+
+-bind + listen are merged into the tcp::acceptor constructor — Asio assumes you always want both when you create an acceptor, so there's no reason to
+separate them
+- Resolver is added — Berkeley sockets have getaddrinfo() as a separate C function; Asio wraps it into tcp::resolver to fit the same object model
+- Buffers are typed — instead of raw void* +length you pass boost::asio::buffer(data) which carries the size with it, preventing a whole class of bugs
+- Async is a first - class option — every operation has an async variant(async_accept, async_read_until, etc.) that Berkeley sockets don't have natively
+
+*/
+
+#include <boost/asio.hpp>
 #include <boost/program_options.hpp>
-#include <filesystem>
-#include <fstream>
-#include <string_view>
-#include <algorithm>
-#include <cstdlib>
-#include <exception>
-#include <boost/interprocess/shared_memory_object.hpp>
-#include <boost/interprocess/mapped_region.hpp>
-#include <boost/interprocess/sync/interprocess_mutex.hpp>
-#include <boost/interprocess/sync/interprocess_condition.hpp>
+#include <iostream>
+#include <string>
 
 using namespace std;
-using namespace std::literals;
-
-string mem_name_str;
-
+using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
 namespace po = boost::program_options;
-namespace ip = boost::interprocess;
 
-constexpr uint16_t kChunksCount{ 2 };
-constexpr uint16_t kChunkSize{ 0xffff };
+// The port both sides agree on.  Both must use the same number.
+const int PORT = 12345;
 
-constexpr int kNotFound{ -1 };
-constexpr streamsize kReadyToRead{ 0 };
+// ---------------------------------------------------------------------------
+// SERVER
+// ---------------------------------------------------------------------------
+void run_server()
+{
+    // io_context is the core Boost.Asio object.
+    // All I/O operations go through it.
+    boost::asio::io_context io;
 
-constexpr uint16_t kStringMaxSize{ 256 };
+    // An acceptor listens on a TCP port and hands out connected sockets.
+    // tcp::v4()     – use IPv4
+    // PORT          – the port number to bind to
+    tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
 
-enum class Role : unsigned int {
-    CREATOR = 0,
-    USER = 1
-};
+    cout << "[Server] Status: LISTENING on port " << PORT << endl;
+    cout << "[Server] Waiting for a client to connect..." << endl;
 
+    // accept() blocks until a client connects.
+    // It returns a fully-connected socket we can read/write on.
+    tcp::socket socket(io);
+    acceptor.accept(socket);   // <-- blocks here
 
-struct DataChunk {
-    array<char, kChunkSize> data{ };
-    streamsize size{ 0 };
-    streamsize index{ kReadyToRead };
-};
+    // If we reach this line, a client has connected.
+    // remote_endpoint() tells us the client's IP address and port.
+    cout << "[Server] Status: CONNECTED  <-- "
+         << socket.remote_endpoint().address().to_string()
+         << ":" << socket.remote_endpoint().port() << endl;
 
-class SharedVars {
-public:
-    ip::interprocess_mutex mtx;
-    ip::interprocess_condition cv;
+    // A streambuf is a resizable byte buffer.
+    // read_until() will fill it until it finds the delimiter we specify.
+    boost::asio::streambuf buffer;
 
-    bool finish = false;
-    bool ongoing = false;
+    // Keep receiving messages until the connection closes or an error occurs.
+    while (true)
+    {
+        boost::system::error_code error;
 
-    array<char, kStringMaxSize> source{ 0 };
-    array<char, kStringMaxSize> destination{ 0 };
+        // read_until() reads bytes from the socket into 'buffer' until it
+        // finds a newline '\n'.  The newline stays in the buffer.
+        // We pass 'error' so the function does not throw; instead it sets
+        // error to a non-zero value and we check it ourselves.
+        boost::asio::read_until(socket, buffer, '\n', error);
 
-    array<DataChunk, kChunksCount> chunks;
-
-    int get_next_index(int index) {
-        for (size_t i = 0; i < chunks.size(); ++i) {
-            if (chunks[i].index == index) {
-                return static_cast<int>(i);
-            }
+        // error == eof means the client closed the connection gracefully.
+        if (error == boost::asio::error::eof)
+        {
+            cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
+            break;
         }
-        return kNotFound;
-    }
-};
 
-class ExploreBehavior {
-public:
-    ExploreBehavior() {
-        cout << "ExploreBehavior: STARTED" << endl;
-    }
-    ~ExploreBehavior() {
-        cout << "ExploreBehavior: STOPPED" << endl;
-    }
-};
+        // Any other non-zero error code is unexpected.
+        if (error)
+        {
+            cout << "[Server] Status: ERROR – " << error.message() << endl;
+            break;
+        }
 
-struct SharedMemoryLayout {
-    atomic<bool> ready{true};
-    SharedVars vars;
-};
+        // Convert the buffer contents to a std::string for easy printing.
+        // istream makes it easy to extract a line from the streambuf.
+        istream stream(&buffer);
+        string line;
+        getline(stream, line);   // extracts up to (and discards) the '\n'
 
+        cout << "[Server] Received: " << line << endl;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLIENT
+// ---------------------------------------------------------------------------
+void run_client()
+{
+    boost::asio::io_context io;
+
+    // A resolver turns a human-readable address ("127.0.0.1" / "localhost")
+    // and service ("12345") into a list of endpoints we can try to connect to.
+    tcp::resolver resolver(io);
+
+    // resolve() returns an iterable list of endpoints.
+    // "127.0.0.1" is the loopback address – always "this machine".
+    auto endpoints = resolver.resolve("127.0.0.1", to_string(PORT));
+
+    tcp::socket socket(io);
+
+    cout << "[Client] Status: CONNECTING to 127.0.0.1:" << PORT << " ..." << endl;
+
+    boost::system::error_code error;
+
+    // connect() tries each endpoint in the list until one succeeds.
+    // If all fail it sets 'error'.
+    boost::asio::connect(socket, endpoints, error);
+
+    if (error)
+    {
+        // Could not reach the server – print why and exit.
+        cout << "[Client] Status: FAILED to connect – " << error.message() << endl;
+        cout << "[Client] Make sure the server is running first." << endl;
+        return;
+    }
+
+    cout << "[Client] Status: CONNECTED to server" << endl;
+    cout << "[Client] Type a message and press Enter to send." << endl;
+    cout << "[Client] Type 'quit' to disconnect." << endl;
+
+    string line;
+
+    // Read lines from the keyboard and send them to the server.
+    while (true)
+    {
+        // getline blocks until the user presses Enter.
+        getline(cin, line);
+
+        if (line == "quit")
+        {
+            // Close the socket cleanly.  The server will see EOF and exit.
+            socket.close();
+            cout << "[Client] Status: DISCONNECTED" << endl;
+            break;
+        }
+
+        // Append '\n' so the server's read_until('\n') knows where the
+        // message ends.  Without it the server would block forever waiting
+        // for the delimiter.
+        string message = line + "\n";
+
+        // write() sends all bytes of 'message' over the socket.
+        // It keeps retrying internally until every byte is sent.
+        boost::asio::write(socket, boost::asio::buffer(message), error);
+
+        if (error)
+        {
+            cout << "[Client] Status: SEND ERROR – " << error.message() << endl;
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    // Declare the supported options.
+    // "role,r" registers both the long form --role and the short form -r.
     po::options_description desc("Allowed options");
     desc.add_options()
-        ("help", "produce help message")
-        ("source", po::value<string>(), "set file to copy from")
-        ("destination", po::value<string>(), "set file to copy to")
-        ("memory", po::value<string>(), "name of shared memory object")
+        ("help",   "produce help message")
+        ("role,r", po::value<string>(), "server or client")
         ;
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
 
-    if (vm.count("help")) { // [m] vm. contains is supposed to be here
-        std::cout << desc << endl;
+    if (vm.count("help"))
+    {
+        cout << desc << endl;
+        return 0;
+    }
+
+    if (!vm.count("role"))
+    {
+        cerr << "Error: --role / -r argument required (server or client)." << endl;
         return 1;
     }
 
-    if (!vm.count("source")) {
-        std::cout << "Source file was not set." << endl;
+    string role = vm["role"].as<string>();
+    cout << "Role: " << role << endl;
+
+    if      (role == "server") run_server();
+    else if (role == "client") run_client();
+    else
+    {
+        cerr << "Unknown role '" << role << "'. Use 'server' or 'client'." << endl;
+        return 1;
     }
-    else if (!vm.count("destination")) {
-        std::cout << "Destination file was not set." << endl;
-    }
-    else if (!vm.count("memory")) {
-        std::cout << "Memory name was not set." << endl;
-    }
-    else {
-        /*cout << "Source: " << vm["source"].as<string>() << endl;
-        cout << "Destination: " << vm["destination"].as<string>() << endl;
-        cout << "Memory: " << vm["memory"].as<string>() << endl;*/
 
-        // ============== MAIN LOGIC IS HERE ======================================
-
-        unique_ptr<ip::shared_memory_object> shm_obj_ptr;
-        int mem_role;
-        SharedVars* sch_vars;
-        SharedMemoryLayout* shm;
-        const auto& mem_name = vm["memory"].as<string>();
-        mem_name_str = vm["memory"].as<string>();
-        bool try_to_join = true;
-		bool wait_for_user = true;
-        uint16_t attemts = 20;
-		string src_file = vm["source"].as<string>();
-		string dst_file = vm["destination"].as<string>();
-
-		// ExploreBehavior explore_behavior;
-
-        // -------------- loop for testing memory and current situation -----------
-        while (true) {
-            // memory is created or opened if already exists
-            // role is assigned based on it
-            try {
-                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::create_only, mem_name.c_str(), ip::read_write);
-                shm_obj_ptr->truncate(sizeof(SharedMemoryLayout));
-                mem_role = static_cast<unsigned int>(Role::CREATOR);
-            }
-            catch (const ip::interprocess_exception&) {
-                this_thread::sleep_for(chrono::microseconds(10));  //workaround for unknown yet issue
-                shm_obj_ptr = make_unique<ip::shared_memory_object>(ip::open_only, mem_name.c_str(), ip::read_write);
-                mem_role = static_cast<unsigned int>(Role::USER);
-            }
-
-            ip::mapped_region region(*shm_obj_ptr, ip::read_write);
-            //ip::shared_memory_object::remove(mem_name_str.c_str());
-
-            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
-                // file names are written to shared memory
-                shm = new (region.get_address()) SharedMemoryLayout;
-                sch_vars = &shm->vars;
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    copy(src_file.begin(), src_file.end(), sch_vars->source.begin());
-					copy(dst_file.begin(), dst_file.end(), sch_vars->destination.begin());
-                }
-                try_to_join = false;
-                std::cout << "CREATOR: STARTED" << endl;
-            }
-            else {
-                // analysis and desicion based on files names comparison
-                shm = static_cast<SharedMemoryLayout*>(region.get_address());
-                while (!shm->ready.load(memory_order_acquire)) {}
-                sch_vars = &shm->vars;
-                {
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    if (sch_vars->ongoing) {
-                        if (src_file == string_view(sch_vars->source.data()) &&
-                            dst_file == string_view(sch_vars->destination.data())) {
-                            std::cout << "NEW: FILES DUPLICATION. EXIT." << endl;
-                            return 0;
-                        }
-                        else {
-                            if (attemts == 0) return 0;
-                            std::cout << "NEW: WAITING. ONE MORE TRY." << endl;
-                            attemts--;
-                        }
-                    }
-                    else {
-                        if (src_file == string_view(sch_vars->source.data()) &&
-                            dst_file == string_view(sch_vars->destination.data())) {
-                            sch_vars->ongoing = true;
-                            try_to_join = false;
-                            std::cout << "USER: STARTED" << endl;
-                        }
-                        else {
-                            if (attemts == 0) return 0;
-                            std::cout << "NEW: NO PAIR. ONE MORE TRY." << endl;
-                            attemts--;
-                        }
-                    }
-                }
-            }
-            if (try_to_join) {
-                this_thread::sleep_for(chrono::milliseconds(500));
-                continue;
-            }
-
-            std::set_terminate([]()
-                {
-                    cout << "Unhandled exception. Memory was removed.\n" << endl;
-                    ip::shared_memory_object::remove(mem_name_str.c_str());
-                    abort();
-                });
-
-            // -------------- fork READER-WRITER with two loops inside ----------------
-            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {  // CREATOR
-                ifstream input_file(vm["source"].as<string>(), ios::binary);
-
-                if(!input_file){
-                    cout << "Failed to open source file." << endl;
-                    ip::shared_memory_object::remove(mem_name_str.c_str());
-                    return 1;
-                }
-
-                size_t chunkIndex{ kReadyToRead };
-                size_t readyToReadIndex{ 0 };
-
-                while (true) {
-                    auto& chunk = sch_vars->chunks[readyToReadIndex];
-                    input_file.read(chunk.data.data(), kChunkSize);
-                    //try{
-                    //    ExploreBehavior explore_behavior;
-                    //    throw 1;
-                    //}
-                    //    catch (int ex_var) {
-                    //    cout << "Error occurred: " << ex_var << endl;
-                    //}
-                    chunk.size = input_file.gcount();
-                    {
-                        ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                        chunk.index = ++chunkIndex;
-                        readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
-                        sch_vars->cv.notify_one();
-                        if (chunk.size != kChunkSize) {
-                            break;
-                        }
-                        if (kNotFound == readyToReadIndex) {
-                            if (!sch_vars->cv.wait_for(lock, chrono::seconds(10), [&readyToReadIndex, sch_vars] {
-                                readyToReadIndex = sch_vars->get_next_index(kReadyToRead);
-                                return kNotFound != readyToReadIndex;
-                                })) {
-                                std::cout << "Timeout: No notification within 10 seconds." << endl;
-                                wait_for_user = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            else {  // USER
-                ofstream output_file(vm["destination"].as<string>(), ios::binary);
-
-                int chunkIndex{ kReadyToRead + 1 };
-                int readyToWriteIndex{ kNotFound };
-                while (true) {
-                    {
-                        ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                        if (readyToWriteIndex != kNotFound) {
-                            auto& chunk = sch_vars->chunks[readyToWriteIndex];
-                            chunk.index = kReadyToRead;
-                            sch_vars->cv.notify_one();
-                            readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
-                        }
-                        if (readyToWriteIndex == kNotFound) {
-                            sch_vars->cv.wait(lock, [&readyToWriteIndex, &chunkIndex, sch_vars] {
-                                readyToWriteIndex = sch_vars->get_next_index(chunkIndex);
-                                return kNotFound != readyToWriteIndex;
-                                });
-                        }
-                        ++chunkIndex;
-                    }
-                    auto& chunk = sch_vars->chunks[readyToWriteIndex];
-                    output_file.write(chunk.data.data(), chunk.size);
-                    if (chunk.size != kChunkSize) {
-                        break;
-                    }
-                }
-            }
-
-            if (mem_role == static_cast<unsigned int>(Role::CREATOR)) {
-                if(wait_for_user){  // wait until user ends
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->cv.wait(lock, [sch_vars] { return sch_vars->finish; });
-                }
-                ip::shared_memory_object::remove(mem_name_str.c_str());
-                std::cout << "CREATOR: FINISHED" << endl;
-            }
-            else {
-                {  //user ends and sends signal to creator
-                    ip::scoped_lock<boost::interprocess::interprocess_mutex> lock(sch_vars->mtx);
-                    sch_vars->finish = true;
-                    sch_vars->cv.notify_one();
-                }
-
-                std::cout << "USER: FINISHED" << endl;
-            }
-            break;
-        }
-    }
+    return 0;
 }
