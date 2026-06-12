@@ -1,8 +1,3 @@
-// TCP/IP server-client demo using Boost.Asio (synchronous, educational).
-//
-// One binary, two roles selected via --role server / --role client (-r).
-// The server listens on localhost:12345, accepts one client, and prints
-// every line it receives.  The client connects and forwards stdin lines.
 
 /*
 ┌──────────────────┬───────────────────────────────────────────────────┐
@@ -44,7 +39,6 @@ using namespace std;
 using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
 namespace po = boost::program_options;
 
-// The port both sides agree on.  Both must use the same number.
 const int PORT = 12345;
 
 // ---------------------------------------------------------------------------
@@ -52,63 +46,43 @@ const int PORT = 12345;
 // ---------------------------------------------------------------------------
 void run_server()
 {
-    // io_context is the core Boost.Asio object.
-    // All I/O operations go through it.
     boost::asio::io_context io;
-
-    // An acceptor listens on a TCP port and hands out connected sockets.
-    // tcp::v4()     – use IPv4
-    // PORT          – the port number to bind to
+    
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
 
     cout << "[Server] Status: LISTENING on port " << PORT << endl;
     cout << "[Server] Waiting for a client to connect..." << endl;
 
-    // accept() blocks until a client connects.
-    // It returns a fully-connected socket we can read/write on.
     tcp::socket socket(io);
     acceptor.accept(socket);   // <-- blocks here
 
-    // If we reach this line, a client has connected.
-    // remote_endpoint() tells us the client's IP address and port.
     cout << "[Server] Status: CONNECTED  <-- "
          << socket.remote_endpoint().address().to_string()
          << ":" << socket.remote_endpoint().port() << endl;
 
-    // A streambuf is a resizable byte buffer.
-    // read_until() will fill it until it finds the delimiter we specify.
     boost::asio::streambuf buffer;
 
-    // Keep receiving messages until the connection closes or an error occurs.
     while (true)
     {
         boost::system::error_code error;
 
-        // read_until() reads bytes from the socket into 'buffer' until it
-        // finds a newline '\n'.  The newline stays in the buffer.
-        // We pass 'error' so the function does not throw; instead it sets
-        // error to a non-zero value and we check it ourselves.
-        boost::asio::read_until(socket, buffer, '\n', error);
+        boost::asio::read_until(socket, buffer, '\n', error);   // <-- blocks here
 
-        // error == eof means the client closed the connection gracefully.
         if (error == boost::asio::error::eof)
         {
             cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
             break;
         }
 
-        // Any other non-zero error code is unexpected.
         if (error)
         {
             cout << "[Server] Status: ERROR – " << error.message() << endl;
             break;
         }
 
-        // Convert the buffer contents to a std::string for easy printing.
-        // istream makes it easy to extract a line from the streambuf.
         istream stream(&buffer);
         string line;
-        getline(stream, line);   // extracts up to (and discards) the '\n'
+        getline(stream, line);
 
         cout << "[Server] Received: " << line << endl;
     }
@@ -121,12 +95,8 @@ void run_client()
 {
     boost::asio::io_context io;
 
-    // A resolver turns a human-readable address ("127.0.0.1" / "localhost")
-    // and service ("12345") into a list of endpoints we can try to connect to.
     tcp::resolver resolver(io);
 
-    // resolve() returns an iterable list of endpoints.
-    // "127.0.0.1" is the loopback address – always "this machine".
     auto endpoints = resolver.resolve("127.0.0.1", to_string(PORT));
 
     tcp::socket socket(io);
@@ -135,13 +105,10 @@ void run_client()
 
     boost::system::error_code error;
 
-    // connect() tries each endpoint in the list until one succeeds.
-    // If all fail it sets 'error'.
-    boost::asio::connect(socket, endpoints, error);
+    boost::asio::connect(socket, endpoints, error);   // <-- blocks here
 
     if (error)
     {
-        // Could not reach the server – print why and exit.
         cout << "[Client] Status: FAILED to connect – " << error.message() << endl;
         cout << "[Client] Make sure the server is running first." << endl;
         return;
@@ -153,28 +120,20 @@ void run_client()
 
     string line;
 
-    // Read lines from the keyboard and send them to the server.
     while (true)
     {
-        // getline blocks until the user presses Enter.
-        getline(cin, line);
+        getline(cin, line);   // <-- blocks here
 
         if (line == "quit")
         {
-            // Close the socket cleanly.  The server will see EOF and exit.
             socket.close();
             cout << "[Client] Status: DISCONNECTED" << endl;
             break;
         }
 
-        // Append '\n' so the server's read_until('\n') knows where the
-        // message ends.  Without it the server would block forever waiting
-        // for the delimiter.
         string message = line + "\n";
 
-        // write() sends all bytes of 'message' over the socket.
-        // It keeps retrying internally until every byte is sent.
-        boost::asio::write(socket, boost::asio::buffer(message), error);
+        boost::asio::write(socket, boost::asio::buffer(message), error);   // <-- blocks here
 
         if (error)
         {
@@ -184,9 +143,7 @@ void run_client()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
+
 int main(int argc, char* argv[])
 {
     // "role,r" registers both the long form --role and the short form -r.
