@@ -33,13 +33,18 @@ separate them
 #include <boost/asio.hpp>
 #include <boost/program_options.hpp>
 #include <iostream>
+#include <fstream>
 #include <string>
+#include <array>
 
 using namespace std;
 using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
 namespace po = boost::program_options;
 
 const int PORT = 12345;
+
+constexpr uint16_t kChunkSize{ 0xffff };
+
 
 // ---------------------------------------------------------------------------
 // SERVER
@@ -49,6 +54,8 @@ void run_server()
     boost::asio::io_context io;
     
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
+
+    ofstream output_file("server_received.txt", ios::binary);
 
     cout << "[Server] Status: LISTENING on port " << PORT << endl;
     cout << "[Server] Waiting for a client to connect..." << endl;
@@ -60,13 +67,17 @@ void run_server()
          << socket.remote_endpoint().address().to_string()
          << ":" << socket.remote_endpoint().port() << endl;
 
-    boost::asio::streambuf buffer;
+    array<char, kChunkSize> buffer;
 
     while (true)
     {
         boost::system::error_code error;
 
-        boost::asio::read_until(socket, buffer, '\n', error);   // <-- blocks here
+        size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+
+        if (bytes_read > 0) {
+            output_file.write(buffer.data(), bytes_read);
+        }
 
         if (error == boost::asio::error::eof)
         {
@@ -79,12 +90,6 @@ void run_server()
             cout << "[Server] Status: ERROR – " << error.message() << endl;
             break;
         }
-
-        istream stream(&buffer);
-        string line;
-        getline(stream, line);
-
-        cout << "[Server] Received: " << line << endl;
     }
 }
 
@@ -94,6 +99,13 @@ void run_server()
 void run_client()
 {
     boost::asio::io_context io;
+
+    ifstream input_file("input1_initial.txt", ios::binary);
+
+    if (!input_file) {
+        cout << "Failed to open source file." << endl;
+        return;
+    }
 
     tcp::resolver resolver(io);
 
@@ -118,28 +130,26 @@ void run_client()
     cout << "[Client] Type a message and press Enter to send." << endl;
     cout << "[Client] Type 'quit' to disconnect." << endl;
 
-    string line;
+    array<char, kChunkSize> buffer{ };
 
     while (true)
     {
-        getline(cin, line);   // <-- blocks here
+        input_file.read(buffer.data(), kChunkSize);
+        streamsize bytes_read = input_file.gcount();
 
-        if (line == "quit")
-        {
-            socket.close();
-            cout << "[Client] Status: DISCONNECTED" << endl;
-            break;
-        }
-
-        string message = line + "\n";
-
-        boost::asio::write(socket, boost::asio::buffer(message), error);   // <-- blocks here
+        boost::asio::write(socket, boost::asio::buffer(buffer, bytes_read), error);   // <-- blocks here
 
         if (error)
         {
             cout << "[Client] Status: SEND ERROR – " << error.message() << endl;
             break;
         }
+
+        if(bytes_read == 0){
+            socket.close();
+            cout << "[Client] Status: DISCONNECTED" << endl;
+            break;
+		}
     }
 }
 
