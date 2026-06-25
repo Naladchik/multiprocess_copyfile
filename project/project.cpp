@@ -34,28 +34,46 @@ separate them
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <array>
+#include <cstdint>
 
 using namespace std;
 using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
 namespace po = boost::program_options;
+namespace fs = std::filesystem;
 
 const int PORT = 12345;
 
 constexpr uint16_t kChunkSize{ 0xffff };
 
+constexpr uint16_t max_string{ 64 };
+
+array<char, kChunkSize> buffer{};
+
+#pragma pack(push, 1)
+struct tFileInfo {
+    uint64_t size;
+    char name[max_string];
+};
+#pragma pack(pop)
+
+tFileInfo file_info{};
+
+//string file_to_send;
+string file_to_send = "";
+
+streamsize bytes_read = sizeof(file_info);
 
 // ---------------------------------------------------------------------------
 // SERVER
 // ---------------------------------------------------------------------------
-void run_server()
+static void run_server()
 {
     boost::asio::io_context io;
     
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
-
-    ofstream output_file("server_received.txt", ios::binary);
 
     cout << "[Server] Status: LISTENING on port " << PORT << endl;
     cout << "[Server] Waiting for a client to connect..." << endl;
@@ -67,21 +85,67 @@ void run_server()
          << socket.remote_endpoint().address().to_string()
          << ":" << socket.remote_endpoint().port() << endl;
 
-    array<char, kChunkSize> buffer;
+    boost::system::error_code error;
+
+    size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+    memcpy(&file_info, buffer.data(), sizeof(file_info));
+    cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+
+	string output_filename = "received/" + string(file_info.name);
+
+    ofstream output_file(output_filename, ios::out | ios::binary | ios::noreplace);
+
+    if (!output_file.is_open()) {
+        std::cerr << "[Server] File already exists! Overwrite prevented." << std::endl;
+        return; // Stop here, do not continue writing
+    }
+
+    bool file_info_received = true;
+	bool file_received = false;
+    uint64_t total_bytes_received = 0;  // only file bytes, file info is not counted
 
     while (true)
     {
-        boost::system::error_code error;
-
         size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
 
         if (bytes_read > 0) {
-            output_file.write(buffer.data(), bytes_read);
+            if (file_info_received) {
+                output_file.write(buffer.data(), bytes_read);
+                total_bytes_received += bytes_read;
+                if (total_bytes_received >= file_info.size) {
+					file_received = true;
+                    cout << "[Server] Received the whole file " << file_info.name << endl;
+                }
+            }
+            else {
+                memcpy(&file_info, buffer.data(), sizeof(file_info));
+                file_info_received = true;
+				cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+            }
         }
 
         if (error == boost::asio::error::eof)
         {
             cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
+            if(!file_received){
+                cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_info.size << " bytes." << endl;
+
+                output_file.close();
+
+                fs::path file_path = "received/" + string(file_info.name);
+
+                try {
+                    if (fs::remove(file_path)) {
+                        std::cout << "[Server] File successfully deleted.\n";
+                    }
+                    else {
+                        std::cout << "[Server] File did not exist.\n";
+                    }
+                }
+                catch (const fs::filesystem_error& err) {
+                    std::cerr << "[Server] Filesystem error: " << err.what() << '\n';
+                }
+			}
             break;
         }
 
@@ -96,16 +160,24 @@ void run_server()
 // ---------------------------------------------------------------------------
 // CLIENT
 // ---------------------------------------------------------------------------
-void run_client()
+static void run_client()
 {
     boost::asio::io_context io;
 
-    ifstream input_file("input1_initial.txt", ios::binary);
+    ifstream input_file(file_to_send, ios::binary);
 
     if (!input_file) {
         cout << "Failed to open source file." << endl;
         return;
     }
+
+    uintmax_t file_size  = filesystem::file_size(file_to_send);
+
+    cout << file_to_send << "  " << file_size << endl;
+
+    strncpy(file_info.name, file_to_send.c_str(), sizeof(file_info.name) - 1);
+	file_info.name[sizeof(file_info.name) - 1] = '\0'; // Ensure null-termination
+	file_info.size = static_cast<uint64_t>(file_size);
 
     tcp::resolver resolver(io);
 
@@ -130,12 +202,20 @@ void run_client()
     cout << "[Client] Type a message and press Enter to send." << endl;
     cout << "[Client] Type 'quit' to disconnect." << endl;
 
-    array<char, kChunkSize> buffer{ };
+	bool file_info_sent = false;
+    uint64_t total_bytes_transmitted = 0;  // only file bytes, file info is not counted
 
     while (true)
     {
-        input_file.read(buffer.data(), kChunkSize);
-        streamsize bytes_read = input_file.gcount();
+        if(file_info_sent){
+            input_file.read(buffer.data(), kChunkSize);
+            bytes_read = input_file.gcount();
+			total_bytes_transmitted += bytes_read;
+        }
+        else {
+			memcpy(buffer.data(), &file_info, sizeof(file_info));
+            file_info_sent = true;
+        }
 
         boost::asio::write(socket, boost::asio::buffer(buffer, bytes_read), error);   // <-- blocks here
 
@@ -145,8 +225,10 @@ void run_client()
             break;
         }
 
+        //if (input_file.eof()){
         if(bytes_read == 0){
             socket.close();
+            cout << "[Client] File was sent. Number of bytes: " << total_bytes_transmitted  << endl;
             cout << "[Client] Status: DISCONNECTED" << endl;
             break;
 		}
@@ -161,6 +243,7 @@ int main(int argc, char* argv[])
     desc.add_options()
         ("help",   "produce help message")
         ("role,r", po::value<string>(), "server or client")
+		("file,f", po::value<string>(), "file to send (client only)")
         ;
 
     po::variables_map vm;
@@ -177,6 +260,16 @@ int main(int argc, char* argv[])
     {
         cerr << "Error: --role / -r argument required (server or client)." << endl;
         return 1;
+    }
+
+    if (vm["role"].as<string>() == "client" && !vm.count("file"))
+    {
+        cerr << "Error: --file / -f argument required for client role." << endl;
+        return 1;
+    }
+    
+    if (vm.count("file") && !vm["file"].empty()) {
+        file_to_send += vm["file"].as<std::string>();
     }
 
     string role = vm["role"].as<string>();
