@@ -1,4 +1,3 @@
-
 /*
 ┌──────────────────┬───────────────────────────────────────────────────┐
 │ Berkeley sockets │               Boost.Asio equivalent               │
@@ -27,7 +26,6 @@ separate them
 - Resolver is added — Berkeley sockets have getaddrinfo() as a separate C function; Asio wraps it into tcp::resolver to fit the same object model
 - Buffers are typed — instead of raw void* +length you pass boost::asio::buffer(data) which carries the size with it, preventing a whole class of bugs
 - Async is a first - class option — every operation has an async variant(async_accept, async_read_until, etc.) that Berkeley sockets don't have natively
-
 */
 
 #include <boost/asio.hpp>
@@ -61,7 +59,8 @@ struct tFileInfo {
 
 tFileInfo file_info{};
 
-//string file_to_send;
+uint32_t size_of_read = sizeof(file_info);
+
 string file_to_send = "";
 
 streamsize bytes_read = sizeof(file_info);
@@ -75,21 +74,25 @@ static void run_server()
     
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
 
-    cout << "[Server] Status: LISTENING on port " << PORT << endl;
-    cout << "[Server] Waiting for a client to connect..." << endl;
+    std::cout << "[Server] Status: LISTENING on port " << PORT << endl;
+    std::cout << "[Server] Waiting for a client to connect..." << endl;
 
     tcp::socket socket(io);
     acceptor.accept(socket);   // <-- blocks here
 
-    cout << "[Server] Status: CONNECTED  <-- "
+    std::cout << "[Server] Status: CONNECTED  <-- "
          << socket.remote_endpoint().address().to_string()
          << ":" << socket.remote_endpoint().port() << endl;
 
     boost::system::error_code error;
 
-    size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+    //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+    size_t bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+
+    size_of_read = kChunkSize;
+
     memcpy(&file_info, buffer.data(), sizeof(file_info));
-    cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+    std::cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
 
 	string output_filename = "received/" + string(file_info.name);
 
@@ -106,29 +109,33 @@ static void run_server()
 
     while (true)
     {
-        size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+        //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
+        size_t bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
 
         if (bytes_read > 0) {
             if (file_info_received) {
                 output_file.write(buffer.data(), bytes_read);
                 total_bytes_received += bytes_read;
                 if (total_bytes_received >= file_info.size) {
-					file_received = true;
-                    cout << "[Server] Received the whole file " << file_info.name << endl;
+                    file_received = true;
+                    size_of_read = 0;
+                    std::cout << "[Server] Received the whole file " << file_info.name << endl;
+                    break;
                 }
+                if (file_info.size - total_bytes_received < kChunkSize) size_of_read  = file_info.size - total_bytes_received;
             }
             else {
                 memcpy(&file_info, buffer.data(), sizeof(file_info));
                 file_info_received = true;
-				cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+                std::cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
             }
         }
 
         if (error == boost::asio::error::eof)
         {
-            cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
+            std::cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
             if(!file_received){
-                cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_info.size << " bytes." << endl;
+                std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_info.size << " bytes." << endl;
 
                 output_file.close();
 
@@ -151,11 +158,12 @@ static void run_server()
 
         if (error)
         {
-            cout << "[Server] Status: ERROR – " << error.message() << endl;
+            std::cout << "[Server] Status: ERROR – " << error.message() << endl;
             break;
         }
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // CLIENT
@@ -167,13 +175,13 @@ static void run_client()
     ifstream input_file(file_to_send, ios::binary);
 
     if (!input_file) {
-        cout << "Failed to open source file." << endl;
+        std::cout << "Failed to open source file." << endl;
         return;
     }
 
     uintmax_t file_size  = filesystem::file_size(file_to_send);
 
-    cout << file_to_send << "  " << file_size << endl;
+    std::cout << file_to_send << "  " << file_size << endl;
 
     strncpy(file_info.name, file_to_send.c_str(), sizeof(file_info.name) - 1);
 	file_info.name[sizeof(file_info.name) - 1] = '\0'; // Ensure null-termination
@@ -185,7 +193,7 @@ static void run_client()
 
     tcp::socket socket(io);
 
-    cout << "[Client] Status: CONNECTING to 127.0.0.1:" << PORT << " ..." << endl;
+    std::cout << "[Client] Status: CONNECTING to 127.0.0.1:" << PORT << " ..." << endl;
 
     boost::system::error_code error;
 
@@ -193,14 +201,14 @@ static void run_client()
 
     if (error)
     {
-        cout << "[Client] Status: FAILED to connect – " << error.message() << endl;
-        cout << "[Client] Make sure the server is running first." << endl;
+        std::cout << "[Client] Status: FAILED to connect – " << error.message() << endl;
+        std::cout << "[Client] Make sure the server is running first." << endl;
         return;
     }
 
-    cout << "[Client] Status: CONNECTED to server" << endl;
-    cout << "[Client] Type a message and press Enter to send." << endl;
-    cout << "[Client] Type 'quit' to disconnect." << endl;
+    std::cout << "[Client] Status: CONNECTED to server" << endl;
+    std::cout << "[Client] Type a message and press Enter to send." << endl;
+    std::cout << "[Client] Type 'quit' to disconnect." << endl;
 
 	bool file_info_sent = false;
     uint64_t total_bytes_transmitted = 0;  // only file bytes, file info is not counted
@@ -221,15 +229,14 @@ static void run_client()
 
         if (error)
         {
-            cout << "[Client] Status: SEND ERROR – " << error.message() << endl;
+            std::cout << "[Client] Status: SEND ERROR – " << error.message() << endl;
             break;
         }
 
-        //if (input_file.eof()){
         if(bytes_read == 0){
             socket.close();
-            cout << "[Client] File was sent. Number of bytes: " << total_bytes_transmitted  << endl;
-            cout << "[Client] Status: DISCONNECTED" << endl;
+            std::cout << "[Client] File was sent. Number of bytes: " << total_bytes_transmitted  << endl;
+            std::cout << "[Client] Status: DISCONNECTED" << endl;
             break;
 		}
     }
@@ -252,7 +259,7 @@ int main(int argc, char* argv[])
 
     if (vm.count("help"))
     {
-        cout << desc << endl;
+        std::cout << desc << endl;
         return 0;
     }
 
@@ -273,7 +280,7 @@ int main(int argc, char* argv[])
     }
 
     string role = vm["role"].as<string>();
-    cout << "Role: " << role << endl;
+    std::cout << "Role: " << role << endl;
 
     if      (role == "server") run_server();
     else if (role == "client") run_client();
