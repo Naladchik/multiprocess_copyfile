@@ -65,9 +65,9 @@ string file_to_send = "";
 // ---------------------------------------------------------------------------
 static void run_server()
 {
-    tFileInfo file_info{};
-    uint64_t size_of_read = sizeof(file_info);
-    streamsize bytes_read = sizeof(file_info);
+    //tFileInfo file_info{};
+    uint64_t size_of_read = sizeof(tFileInfo);
+    streamsize bytes_read = sizeof(tFileInfo);
 
     boost::asio::io_context io;
     
@@ -93,12 +93,16 @@ static void run_server()
         return;
     }
 
+	void* p = buffer.data();
+	tFileInfo* s_p = static_cast<tFileInfo*>(p);
+
     size_of_read = kChunkSize;
+    uintmax_t file_size = s_p->size;
+	string file_name = string(s_p->name);  // still needed for the deletion in case of incomplete transfer
 
-    memcpy(&file_info, buffer.data(), sizeof(file_info));
-    std::cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+    std::cout << "[Server] Received file info: " << s_p->name << " (" << s_p->size << " bytes)" << endl;
 
-	string output_filename = "received/" + string(file_info.name);
+	string output_filename = "received/" + string(s_p->name);
 
     ofstream output_file(output_filename, ios::out | ios::binary | ios::noreplace);
 
@@ -112,36 +116,35 @@ static void run_server()
 
     while (true)
     {
-        //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
         bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
 
         if (bytes_read > 0) {  
             output_file.write(buffer.data(), bytes_read);
             total_bytes_received += bytes_read;
-            if (total_bytes_received == file_info.size) {
+            if (total_bytes_received == file_size) {
                 file_received = true;
                 size_of_read = 0;
-                std::cout << "[Server] Received the whole file " << file_info.name << endl;
+                std::cout << "[Server] Received the whole file " << endl;
                 break;
             }
 
-            if (total_bytes_received > file_info.size) {
+            if (total_bytes_received > file_size) {
                 std::cout << "[Server] Received more data than expected! " << total_bytes_received << endl;
                 break;
             }
 
-            if (file_info.size - total_bytes_received < kChunkSize) size_of_read  = file_info.size - total_bytes_received;
+            if (file_size - total_bytes_received < kChunkSize) size_of_read  = file_size - total_bytes_received;
         }            
 
         if (error == boost::asio::error::eof)
         {
             std::cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
             if(!file_received){
-                std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_info.size << " bytes." << endl;
+                std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_size << " bytes." << endl;
 
                 output_file.close();
 
-                fs::path file_path = "received/" + string(file_info.name);
+                fs::path file_path = "received/" + file_name;
 
                 try {
                     if (fs::remove(file_path)) {
@@ -172,26 +175,27 @@ static void run_server()
 // ---------------------------------------------------------------------------
 static void run_client()
 {
-    tFileInfo file_info{};
-    streamsize bytes_read = sizeof(file_info);
-
     boost::asio::io_context io;
+
+    uintmax_t file_size;
 
     ifstream input_file(file_to_send, ios::binary);
 
     if (!input_file) {
-        std::cout << "Failed to open source file." << endl;
+        std::cout << "[Client] Failed to open source file " << file_to_send  << endl;
         return;
     }
+    else {
+        file_size = filesystem::file_size(file_to_send);
+        std::cout << "[Client] File " << file_to_send << " with size " << file_size << " will be sent." << endl;
+    }    
 
-    uintmax_t file_size  = filesystem::file_size(file_to_send);
-
-    std::cout << file_to_send << "  " << file_size << endl;
-
-    strncpy_s(file_info.name, sizeof(file_info.name), file_to_send.c_str(), _TRUNCATE);
-
-	file_info.name[sizeof(file_info.name) - 1] = '\0'; // Ensure null-termination
-	file_info.size = static_cast<uint64_t>(file_size);
+	//tFileInfo structure is placed directly to buffer
+	void* p = buffer.data();
+    tFileInfo* s_p = static_cast<tFileInfo*>(p);
+    strncpy_s(s_p->name, sizeof(s_p->name), file_to_send.c_str(), _TRUNCATE);
+    s_p->name[sizeof(s_p->name) - 1] = '\0'; // Ensure null-termination
+    s_p->size = static_cast<uint64_t>(file_size);
 
     tcp::resolver resolver(io);
 
@@ -217,6 +221,7 @@ static void run_client()
     std::cout << "[Client] Type 'quit' to disconnect." << endl;
 
 	bool file_info_sent = false;
+    streamsize bytes_read = sizeof(tFileInfo);
     uint64_t total_bytes_transmitted = 0;  // only file bytes, file info is not counted
 
     while (true)
@@ -227,7 +232,7 @@ static void run_client()
 			total_bytes_transmitted += bytes_read;
         }
         else {
-			memcpy(buffer.data(), &file_info, sizeof(file_info));
+			//memcpy(buffer.data(), &file_info, sizeof(file_info));
             file_info_sent = true;
         }
 
@@ -282,7 +287,7 @@ int main(int argc, char* argv[])
     }
     
     if (vm.count("file") && !vm["file"].empty()) {
-        file_to_send += vm["file"].as<std::string>();
+        file_to_send = vm["file"].as<std::string>();
     }
 
     string role = vm["role"].as<string>();
