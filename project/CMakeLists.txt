@@ -12,6 +12,10 @@ FIND_PACKAGE(Boost COMPONENTS program_options REQUIRED )
 
 add_executable(WorkProject project.cpp)
 
+if(MSVC)
+    target_compile_options(WorkProject PRIVATE /W4 /WX)
+endif()
+
 target_compile_options(WorkProject PRIVATE /FA)
 
 target_link_libraries(WorkProject PRIVATE Boost::program_options)

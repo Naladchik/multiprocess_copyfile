@@ -36,6 +36,7 @@ separate them
 #include <string>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 using namespace std;
 using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
@@ -59,7 +60,7 @@ struct tFileInfo {
 
 tFileInfo file_info{};
 
-uint32_t size_of_read = sizeof(file_info);
+uint64_t size_of_read = sizeof(file_info);
 
 string file_to_send = "";
 
@@ -87,7 +88,7 @@ static void run_server()
     boost::system::error_code error;
 
     //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
-    size_t bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+    bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
 
     size_of_read = kChunkSize;
 
@@ -110,7 +111,7 @@ static void run_server()
     while (true)
     {
         //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
-        size_t bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+        bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
 
         if (bytes_read > 0) {
             if (file_info_received) {
@@ -183,7 +184,8 @@ static void run_client()
 
     std::cout << file_to_send << "  " << file_size << endl;
 
-    strncpy(file_info.name, file_to_send.c_str(), sizeof(file_info.name) - 1);
+    strncpy_s(file_info.name, sizeof(file_info.name), file_to_send.c_str(), _TRUNCATE);
+
 	file_info.name[sizeof(file_info.name) - 1] = '\0'; // Ensure null-termination
 	file_info.size = static_cast<uint64_t>(file_size);
 
