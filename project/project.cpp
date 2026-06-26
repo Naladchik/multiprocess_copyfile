@@ -58,19 +58,17 @@ struct tFileInfo {
 };
 #pragma pack(pop)
 
-tFileInfo file_info{};
-
-uint64_t size_of_read = sizeof(file_info);
-
 string file_to_send = "";
-
-streamsize bytes_read = sizeof(file_info);
 
 // ---------------------------------------------------------------------------
 // SERVER
 // ---------------------------------------------------------------------------
 static void run_server()
 {
+    tFileInfo file_info{};
+    uint64_t size_of_read = sizeof(file_info);
+    streamsize bytes_read = sizeof(file_info);
+
     boost::asio::io_context io;
     
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
@@ -87,8 +85,13 @@ static void run_server()
 
     boost::system::error_code error;
 
-    //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
     bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+
+    if (error)
+    {
+        std::cout << "[Server] Error during receiving file info. Status: ERROR – " << error.message() << endl;
+        return;
+    }
 
     size_of_read = kChunkSize;
 
@@ -104,7 +107,6 @@ static void run_server()
         return; // Stop here, do not continue writing
     }
 
-    bool file_info_received = true;
 	bool file_received = false;
     uint64_t total_bytes_received = 0;  // only file bytes, file info is not counted
 
@@ -113,24 +115,23 @@ static void run_server()
         //size_t bytes_read = socket.read_some(boost::asio::buffer(buffer), error);   // <-- blocks here
         bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
 
-        if (bytes_read > 0) {
-            if (file_info_received) {
-                output_file.write(buffer.data(), bytes_read);
-                total_bytes_received += bytes_read;
-                if (total_bytes_received >= file_info.size) {
-                    file_received = true;
-                    size_of_read = 0;
-                    std::cout << "[Server] Received the whole file " << file_info.name << endl;
-                    break;
-                }
-                if (file_info.size - total_bytes_received < kChunkSize) size_of_read  = file_info.size - total_bytes_received;
+        if (bytes_read > 0) {  
+            output_file.write(buffer.data(), bytes_read);
+            total_bytes_received += bytes_read;
+            if (total_bytes_received == file_info.size) {
+                file_received = true;
+                size_of_read = 0;
+                std::cout << "[Server] Received the whole file " << file_info.name << endl;
+                break;
             }
-            else {
-                memcpy(&file_info, buffer.data(), sizeof(file_info));
-                file_info_received = true;
-                std::cout << "[Server] Received file info: " << file_info.name << " (" << file_info.size << " bytes)" << endl;
+
+            if (total_bytes_received > file_info.size) {
+                std::cout << "[Server] Received more data than expected! " << total_bytes_received << endl;
+                break;
             }
-        }
+
+            if (file_info.size - total_bytes_received < kChunkSize) size_of_read  = file_info.size - total_bytes_received;
+        }            
 
         if (error == boost::asio::error::eof)
         {
@@ -171,6 +172,9 @@ static void run_server()
 // ---------------------------------------------------------------------------
 static void run_client()
 {
+    tFileInfo file_info{};
+    streamsize bytes_read = sizeof(file_info);
+
     boost::asio::io_context io;
 
     ifstream input_file(file_to_send, ios::binary);
@@ -262,19 +266,19 @@ int main(int argc, char* argv[])
     if (vm.count("help"))
     {
         std::cout << desc << endl;
-        return 0;
+        return EXIT_SUCCESS;
     }
 
     if (!vm.count("role"))
     {
         cerr << "Error: --role / -r argument required (server or client)." << endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
     if (vm["role"].as<string>() == "client" && !vm.count("file"))
     {
         cerr << "Error: --file / -f argument required for client role." << endl;
-        return 1;
+        return EXIT_FAILURE;
     }
     
     if (vm.count("file") && !vm["file"].empty()) {
@@ -289,8 +293,8 @@ int main(int argc, char* argv[])
     else
     {
         cerr << "Unknown role '" << role << "'. Use 'server' or 'client'." << endl;
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }
