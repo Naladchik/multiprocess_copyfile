@@ -253,6 +253,12 @@ static void run_client()
     }
 }
 
+bool is_filename_ok(const string& s_input) {
+    if (s_input.empty()) return false;
+	fs::path p(s_input);
+	return !p.has_parent_path() && p != "." && p != ".." && p.filename() == p;
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -288,6 +294,10 @@ int main(int argc, char* argv[])
     
     if (vm.count("file") && !vm["file"].empty()) {
         file_to_send = vm["file"].as<std::string>();
+        if (!is_filename_ok(file_to_send)) {
+            cerr << "Provided file name: " << file_to_send << " is not OK" << endl;
+            return EXIT_FAILURE;
+        }        
     }
 
     string role = vm["role"].as<string>();
