@@ -10,6 +10,8 @@ set(CMAKE_CXX_EXTENSIONS ON)
 
 FIND_PACKAGE(Boost COMPONENTS program_options REQUIRED )
 
+find_package(OpenSSL REQUIRED)
+
 add_executable(WorkProject project.cpp)
 
 if(MSVC)
@@ -19,3 +21,5 @@ endif()
 target_compile_options(WorkProject PRIVATE /FA)
 
 target_link_libraries(WorkProject PRIVATE Boost::program_options)
+
+target_link_libraries(WorkProject PRIVATE OpenSSL::Crypto)
