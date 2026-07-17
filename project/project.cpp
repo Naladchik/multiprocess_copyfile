@@ -45,11 +45,15 @@ namespace fs = std::filesystem;
 
 const int PORT = 12345;
 
-constexpr uint16_t kChunkSize{ 0xffff };
-
 constexpr uint16_t max_string{ 64 };
 
-array<char, kChunkSize> buffer{};
+constexpr uint16_t kChunkSize{ 0xffff };
+
+constexpr uint16_t kHeaderSize{ 0xff };
+
+array<char, kChunkSize> buffer_pdu{};
+
+array<char, kChunkSize - kHeaderSize> buffer_payload{};
 
 #pragma pack(push, 1)
 struct tFileInfo {
@@ -59,6 +63,14 @@ struct tFileInfo {
 #pragma pack(pop)
 
 string file_to_send = "";
+
+void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - kHeaderSize>& buf_output) {
+    std::copy(buf_input.begin() + kHeaderSize, buf_input.end(), buf_output.begin());
+}
+
+void encrypt_chunk(array<char, kChunkSize - kHeaderSize>& buf_input, array<char, kChunkSize>& buf_output){
+    std::copy(buf_input.begin(), buf_input.end(), buf_output.begin() + kHeaderSize);
+}
 
 // ---------------------------------------------------------------------------
 // SERVER
@@ -85,7 +97,9 @@ static void run_server()
 
     boost::system::error_code error;
 
-    bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+    bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer_pdu, size_of_read), error);
+
+    std::cout << "[Server] PDU recieved with size " << bytes_read << " bytes. It is file info." << std::endl;
 
     if (error)
     {
@@ -93,7 +107,7 @@ static void run_server()
         return;
     }
 
-	void* p = buffer.data();
+	void* p = buffer_pdu.data();
 	tFileInfo* s_p = static_cast<tFileInfo*>(p);
 
     size_of_read = kChunkSize;
@@ -116,10 +130,48 @@ static void run_server()
 
     while (true)
     {
-        bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer, size_of_read), error);
+        if ((file_size - total_bytes_received) < kChunkSize) {
+            size_of_read = file_size - total_bytes_received + kHeaderSize;
+        }
+
+        bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer_pdu, size_of_read), error);
+
+        if (error == boost::asio::error::eof)
+        {
+            std::cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
+                     if(!file_received){
+                         std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_size << " bytes." << endl;
+                         output_file.close();
+                         fs::path file_path = "received/" + file_name;
+                         try {
+                             if (fs::remove(file_path)) {
+                                 std::cout << "[Server] File successfully deleted.\n";
+                             }
+                             else {
+                                 std::cout << "[Server] File did not exist.\n";
+                             }
+                         }
+                         catch (const fs::filesystem_error& err) {
+                             std::cerr << "[Server] Filesystem error: " << err.what() << '\n';
+                         }
+                     }
+            break;
+        }
+
+        if (error)
+        {
+            std::cout << "[Server] Status: ERROR – " << error.message() << endl;
+            break;
+        }
+
+        std::cout << "[Server] PDU recieved with size " << bytes_read << "bytes. Payload is " << bytes_read - kHeaderSize << " bytes." << std::endl;
+
+        //DECRYPTION HERE
+        bytes_read -= kHeaderSize;
+        decrypt_chunk(buffer_pdu, buffer_payload);
 
         if (bytes_read > 0) {  
-            output_file.write(buffer.data(), bytes_read);
+            output_file.write(buffer_payload.data(), bytes_read);
             total_bytes_received += bytes_read;
             if (total_bytes_received == file_size) {
                 file_received = true;
@@ -134,37 +186,6 @@ static void run_server()
             }
 
             if (file_size - total_bytes_received < kChunkSize) size_of_read  = file_size - total_bytes_received;
-        }            
-
-        if (error == boost::asio::error::eof)
-        {
-            std::cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
-            if(!file_received){
-                std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_size << " bytes." << endl;
-
-                output_file.close();
-
-                fs::path file_path = "received/" + file_name;
-
-                try {
-                    if (fs::remove(file_path)) {
-                        std::cout << "[Server] File successfully deleted.\n";
-                    }
-                    else {
-                        std::cout << "[Server] File did not exist.\n";
-                    }
-                }
-                catch (const fs::filesystem_error& err) {
-                    std::cerr << "[Server] Filesystem error: " << err.what() << '\n';
-                }
-			}
-            break;
-        }
-
-        if (error)
-        {
-            std::cout << "[Server] Status: ERROR – " << error.message() << endl;
-            break;
         }
     }
 }
@@ -191,7 +212,7 @@ static void run_client()
     }    
 
 	//tFileInfo structure is placed directly to buffer
-	void* p = buffer.data();
+	void* p = buffer_pdu.data();
     tFileInfo* s_p = static_cast<tFileInfo*>(p);
     strncpy_s(s_p->name, sizeof(s_p->name), file_to_send.c_str(), _TRUNCATE);
     s_p->name[sizeof(s_p->name) - 1] = '\0'; // Ensure null-termination
@@ -217,39 +238,39 @@ static void run_client()
     }
 
     std::cout << "[Client] Status: CONNECTED to server" << endl;
-    std::cout << "[Client] Type a message and press Enter to send." << endl;
-    std::cout << "[Client] Type 'quit' to disconnect." << endl;
 
-	bool file_info_sent = false;
     streamsize bytes_read = sizeof(tFileInfo);
+
+    std::cout << "[Client] transmitting file info of size " << bytes_read << " bytes." << std::endl;
+    boost::asio::write(socket, boost::asio::buffer(buffer_pdu, bytes_read), error);
+
     uint64_t total_bytes_transmitted = 0;  // only file bytes, file info is not counted
 
     while (true)
     {
-        if(file_info_sent){
-            input_file.read(buffer.data(), kChunkSize);
-            bytes_read = input_file.gcount();
-			total_bytes_transmitted += bytes_read;
-        }
-        else {
-			//memcpy(buffer.data(), &file_info, sizeof(file_info));
-            file_info_sent = true;
+        input_file.read(buffer_payload.data(), kChunkSize - kHeaderSize);
+        bytes_read = input_file.gcount();
+		total_bytes_transmitted += bytes_read;
+
+        if (bytes_read == 0) {
+            socket.close();
+            std::cout << "[Client] File was sent. Number of bytes: " << total_bytes_transmitted << endl;
+            std::cout << "[Client] Status: DISCONNECTED" << endl;
+            break;
         }
 
-        boost::asio::write(socket, boost::asio::buffer(buffer, bytes_read), error);   // <-- blocks here
+        //ENCRYPTION HERE
+        encrypt_chunk(buffer_payload, buffer_pdu);
+
+        std::cout << "[Client] transmitting PDU " << bytes_read + kHeaderSize << " bytes with payload " << bytes_read << " bytes." <<std::endl;
+
+        boost::asio::write(socket, boost::asio::buffer(buffer_pdu, bytes_read + kHeaderSize), error);   // <-- blocks here
 
         if (error)
         {
             std::cout << "[Client] Status: SEND ERROR – " << error.message() << endl;
             break;
         }
-
-        if(bytes_read == 0){
-            socket.close();
-            std::cout << "[Client] File was sent. Number of bytes: " << total_bytes_transmitted  << endl;
-            std::cout << "[Client] Status: DISCONNECTED" << endl;
-            break;
-		}
     }
 }
 
