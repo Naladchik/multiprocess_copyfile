@@ -37,6 +37,12 @@ separate them
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <vector>
+#include <memory>
+#include <stdexcept>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <span>
 
 using namespace std;
 using boost::asio::ip::tcp;   // shorthand so we can write tcp::socket etc.
@@ -44,16 +50,25 @@ namespace po = boost::program_options;
 namespace fs = std::filesystem;
 
 const int PORT = 12345;
-
 constexpr uint16_t max_string{ 64 };
-
 constexpr uint16_t kChunkSize{ 0xffff };
+constexpr uint16_t kHeaderSize{ 0xff }; //must be not less than KEY_SIZE + IV_SIZE + TAG_SIZE
+constexpr size_t KEY_SIZE = 32;       // 256 bits for AES-256
+constexpr size_t IV_SIZE = 12;        // 96 bits (standard & recommended for GCM)
+constexpr size_t TAG_SIZE = 16;       // 128-bit authentication tag
 
-constexpr uint16_t kHeaderSize{ 0xff };
+// Helper unique_ptr cleanup for OpenSSL contexts
+using EVP_CIPHER_CTX_ptr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
+
+std::string key_source = "MySuperSecretKeyMustBe32Bytes!!!"; // 32 characters
 
 array<char, kChunkSize> buffer_pdu{};
-
 array<char, kChunkSize - kHeaderSize> buffer_payload{};
+
+struct tEncryptedChunk {
+    std::array<uint8_t, IV_SIZE> iv;             // Unique IV used for this chunk
+    std::array<uint8_t, TAG_SIZE> tag;           // Authentication tag
+};
 
 #pragma pack(push, 1)
 struct tFileInfo {
@@ -64,12 +79,106 @@ struct tFileInfo {
 
 string file_to_send = "";
 
-void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - kHeaderSize>& buf_output) {
-    std::copy(buf_input.begin() + kHeaderSize, buf_input.end(), buf_output.begin());
+void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - kHeaderSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key) {
+    void* p = buf_input.data();
+    tEncryptedChunk* chunk = static_cast<tEncryptedChunk*>(p);
+
+    std::span<char> data_input{ buf_input.data() + kHeaderSize, kChunkSize - kHeaderSize };
+
+    // 1. Create and initialize Cipher Context
+    EVP_CIPHER_CTX_ptr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    if (!ctx) throw std::runtime_error("Failed to create EVP Cipher Context.");
+
+    // 2. Initialize decryption using AES-256-GCM
+    if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) {
+        throw std::runtime_error("Failed to initialize AES-GCM decryption.");
+    }
+
+    // 3. Set the IV length
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(chunk->iv.size()), nullptr) != 1) {
+        throw std::runtime_error("Failed to set IV length.");
+    }
+
+    // 4. Initialize Key and IV
+    if (EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), chunk->iv.data()) != 1) {
+        throw std::runtime_error("Failed to set key and IV.");
+    }
+
+    // 5. Decrypt ciphertext chunk
+    int out_len = 0;
+    auto* plaintext_ptr = reinterpret_cast<unsigned char*>(buf_output.data());
+    const auto* ciphertext_ptr = reinterpret_cast<const unsigned char*>(data_input.data());
+
+    if (EVP_DecryptUpdate(ctx.get(), plaintext_ptr, &out_len, ciphertext_ptr, static_cast<int>(data_input.size())) != 1) {
+        throw std::runtime_error("Decryption failed during update step.");
+    }
+    int total_len = out_len;
+
+    // 6. Set the expected authentication tag
+    // Const cast is required because EVP_CIPHER_CTX_ctrl modifies internal context state, not the tag buffer itself
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, static_cast<int>(chunk->tag.size()), const_cast<uint8_t*>(chunk->tag.data())) != 1) {
+        throw std::runtime_error("Failed to set expected authentication tag.");
+    }
+
+    // 7. Finalize decryption. This is where OpenSSL verifies the Tag!
+    // If the data was modified, this will fail and return <= 0
+    if (EVP_DecryptFinal_ex(ctx.get(), plaintext_ptr + total_len, &out_len) <= 0) {
+        throw std::runtime_error("Decryption/Integrity check failed! (Data has been altered or key/IV/tag is incorrect).");
+    }
+
+    //std::copy(buf_input.begin() + kHeaderSize, buf_input.end(), buf_output.begin());
 }
 
-void encrypt_chunk(array<char, kChunkSize - kHeaderSize>& buf_input, array<char, kChunkSize>& buf_output){
-    std::copy(buf_input.begin(), buf_input.end(), buf_output.begin() + kHeaderSize);
+void encrypt_chunk(const array<char, kChunkSize - kHeaderSize>& buf_input, array<char, kChunkSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key){
+    void* p = buf_output.data();
+    tEncryptedChunk* chunk = static_cast<tEncryptedChunk*>(p);
+
+    std::span<char> data_output{ buf_output.data() + kHeaderSize, kChunkSize - kHeaderSize };
+
+    // 1. Generate a cryptographically secure random IV for this chunk
+    if (RAND_bytes(chunk->iv.data(), static_cast<int>(chunk->iv.size())) != 1) {
+        throw std::runtime_error("Failed to generate random IV.");
+    }
+
+    // 2. Create and initialize the OpenSSL Cipher Context
+    EVP_CIPHER_CTX_ptr ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    if (!ctx) throw std::runtime_error("Failed to create EVP Cipher Context.");
+
+    // 3. Initialize encryption using AES-256-GCM
+    if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) {
+        throw std::runtime_error("Failed to initialize AES-GCM encryption.");
+    }
+
+    // 4. Set the IV length (GCM default is 12, but it's good practice to set it explicitly)
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(chunk->iv.size()), nullptr) != 1) {
+        throw std::runtime_error("Failed to set IV length.");
+    }
+
+    // 5. Initialize Key and IV
+    if (EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), chunk->iv.data()) != 1) {
+        throw std::runtime_error("Failed to set key and IV.");
+    }
+
+    // 6. Encrypt the input chunk
+    int out_len = 0;
+    auto* ciphertext_ptr = reinterpret_cast<unsigned char*>(data_output.data());
+    const auto* plaintext_ptr = reinterpret_cast<const unsigned char*>(buf_input.data());
+
+    if (EVP_EncryptUpdate(ctx.get(), ciphertext_ptr, &out_len, plaintext_ptr, static_cast<int>(buf_input.size())) != 1) {
+        throw std::runtime_error("Encryption failed during update step.");
+    }
+    int total_len = out_len;
+
+    // 7. Finalize Encryption
+    if (EVP_EncryptFinal_ex(ctx.get(), ciphertext_ptr + total_len, &out_len) != 1) {
+        throw std::runtime_error("Encryption failed during final step.");
+    }
+
+    // 8. Extract the Authentication Tag (Critical for GCM security)
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(chunk->tag.size()), chunk->tag.data()) != 1) {
+        throw std::runtime_error("Failed to retrieve authentication tag.");
+    }
+    //std::copy(buf_input.begin(), buf_input.end(), buf_output.begin() + kHeaderSize);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +186,9 @@ void encrypt_chunk(array<char, kChunkSize - kHeaderSize>& buf_input, array<char,
 // ---------------------------------------------------------------------------
 static void run_server()
 {
+    std::array<uint8_t, KEY_SIZE> secret_key{};
+    std::memcpy(secret_key.data(), key_source.data(), KEY_SIZE);
+
     //tFileInfo file_info{};
     uint64_t size_of_read = sizeof(tFileInfo);
     streamsize bytes_read = sizeof(tFileInfo);
@@ -168,7 +280,12 @@ static void run_server()
 
         //DECRYPTION HERE
         bytes_read -= kHeaderSize;
-        decrypt_chunk(buffer_pdu, buffer_payload);
+        try {
+            decrypt_chunk(buffer_pdu, buffer_payload, secret_key);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Cryptographic Error: " << e.what() << std::endl;
+        }
 
         if (bytes_read > 0) {  
             output_file.write(buffer_payload.data(), bytes_read);
@@ -196,6 +313,9 @@ static void run_server()
 // ---------------------------------------------------------------------------
 static void run_client()
 {
+    std::array<uint8_t, KEY_SIZE> secret_key{};
+    std::memcpy(secret_key.data(), key_source.data(), KEY_SIZE);
+
     boost::asio::io_context io;
 
     uintmax_t file_size;
@@ -260,7 +380,12 @@ static void run_client()
         }
 
         //ENCRYPTION HERE
-        encrypt_chunk(buffer_payload, buffer_pdu);
+        try {
+            encrypt_chunk(buffer_payload, buffer_pdu, secret_key);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Cryptographic Error: " << e.what() << std::endl;
+        }
 
         std::cout << "[Client] transmitting PDU " << bytes_read + kHeaderSize << " bytes with payload " << bytes_read << " bytes." <<std::endl;
 
