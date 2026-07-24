@@ -79,7 +79,8 @@ struct tFileInfo {
 
 string file_to_send = "";
 
-void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - kHeaderSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key) {
+// Decrypts exactly `payload_len` bytes instead of the entire buffer
+void decrypt_chunk(array<char, kChunkSize>& buf_input, size_t payload_len, array<char, kChunkSize - kHeaderSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key) {
     void* p = buf_input.data();
     tEncryptedChunk* chunk = static_cast<tEncryptedChunk*>(p);
 
@@ -109,7 +110,8 @@ void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - 
     auto* plaintext_ptr = reinterpret_cast<unsigned char*>(buf_output.data());
     const auto* ciphertext_ptr = reinterpret_cast<const unsigned char*>(data_input.data());
 
-    if (EVP_DecryptUpdate(ctx.get(), plaintext_ptr, &out_len, ciphertext_ptr, static_cast<int>(data_input.size())) != 1) {
+    // Decrypt only the actual payload_len bytes
+    if (EVP_DecryptUpdate(ctx.get(), plaintext_ptr, &out_len, ciphertext_ptr, static_cast<int>(payload_len)) != 1) {
         throw std::runtime_error("Decryption failed during update step.");
     }
     int total_len = out_len;
@@ -125,11 +127,10 @@ void decrypt_chunk(array<char, kChunkSize>& buf_input, array<char, kChunkSize - 
     if (EVP_DecryptFinal_ex(ctx.get(), plaintext_ptr + total_len, &out_len) <= 0) {
         throw std::runtime_error("Decryption/Integrity check failed! (Data has been altered or key/IV/tag is incorrect).");
     }
-
-    //std::copy(buf_input.begin() + kHeaderSize, buf_input.end(), buf_output.begin());
 }
 
-void encrypt_chunk(const array<char, kChunkSize - kHeaderSize>& buf_input, array<char, kChunkSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key){
+// Encrypts exactly `payload_len` bytes instead of the entire buffer
+void encrypt_chunk(const array<char, kChunkSize - kHeaderSize>& buf_input, size_t payload_len, array<char, kChunkSize>& buf_output, const std::array<uint8_t, KEY_SIZE>& key) {
     void* p = buf_output.data();
     tEncryptedChunk* chunk = static_cast<tEncryptedChunk*>(p);
 
@@ -159,12 +160,12 @@ void encrypt_chunk(const array<char, kChunkSize - kHeaderSize>& buf_input, array
         throw std::runtime_error("Failed to set key and IV.");
     }
 
-    // 6. Encrypt the input chunk
+    // 6. Encrypt only the actual payload_len bytes
     int out_len = 0;
     auto* ciphertext_ptr = reinterpret_cast<unsigned char*>(data_output.data());
     const auto* plaintext_ptr = reinterpret_cast<const unsigned char*>(buf_input.data());
 
-    if (EVP_EncryptUpdate(ctx.get(), ciphertext_ptr, &out_len, plaintext_ptr, static_cast<int>(buf_input.size())) != 1) {
+    if (EVP_EncryptUpdate(ctx.get(), ciphertext_ptr, &out_len, plaintext_ptr, static_cast<int>(payload_len)) != 1) {
         throw std::runtime_error("Encryption failed during update step.");
     }
     int total_len = out_len;
@@ -178,7 +179,6 @@ void encrypt_chunk(const array<char, kChunkSize - kHeaderSize>& buf_input, array
     if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(chunk->tag.size()), chunk->tag.data()) != 1) {
         throw std::runtime_error("Failed to retrieve authentication tag.");
     }
-    //std::copy(buf_input.begin(), buf_input.end(), buf_output.begin() + kHeaderSize);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,12 +189,11 @@ static void run_server()
     std::array<uint8_t, KEY_SIZE> secret_key{};
     std::memcpy(secret_key.data(), key_source.data(), KEY_SIZE);
 
-    //tFileInfo file_info{};
     uint64_t size_of_read = sizeof(tFileInfo);
     streamsize bytes_read = sizeof(tFileInfo);
 
     boost::asio::io_context io;
-    
+
     tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
 
     std::cout << "[Server] Status: LISTENING on port " << PORT << endl;
@@ -204,14 +203,14 @@ static void run_server()
     acceptor.accept(socket);   // <-- blocks here
 
     std::cout << "[Server] Status: CONNECTED  <-- "
-         << socket.remote_endpoint().address().to_string()
-         << ":" << socket.remote_endpoint().port() << endl;
+        << socket.remote_endpoint().address().to_string()
+        << ":" << socket.remote_endpoint().port() << endl;
 
     boost::system::error_code error;
 
     bytes_read = boost::asio::read(socket, boost::asio::buffer(buffer_pdu, size_of_read), error);
 
-    std::cout << "[Server] PDU recieved with size " << bytes_read << " bytes. It is file info." << std::endl;
+    std::cout << "[Server] PDU received with size " << bytes_read << " bytes. It is file info." << std::endl;
 
     if (error)
     {
@@ -219,16 +218,16 @@ static void run_server()
         return;
     }
 
-	void* p = buffer_pdu.data();
-	tFileInfo* s_p = static_cast<tFileInfo*>(p);
+    void* p = buffer_pdu.data();
+    tFileInfo* s_p = static_cast<tFileInfo*>(p);
 
     size_of_read = kChunkSize;
     uintmax_t file_size = s_p->size;
-	string file_name = string(s_p->name);  // still needed for the deletion in case of incomplete transfer
+    string file_name = string(s_p->name);  // still needed for the deletion in case of incomplete transfer
 
     std::cout << "[Server] Received file info: " << s_p->name << " (" << s_p->size << " bytes)" << endl;
 
-	string output_filename = "received/" + string(s_p->name);
+    string output_filename = "received/" + string(s_p->name);
 
     ofstream output_file(output_filename, ios::out | ios::binary | ios::noreplace);
 
@@ -237,7 +236,7 @@ static void run_server()
         return; // Stop here, do not continue writing
     }
 
-	bool file_received = false;
+    bool file_received = false;
     uint64_t total_bytes_received = 0;  // only file bytes, file info is not counted
 
     while (true)
@@ -251,22 +250,22 @@ static void run_server()
         if (error == boost::asio::error::eof)
         {
             std::cout << "[Server] Status: DISCONNECTED (client closed the connection)" << endl;
-                     if(!file_received){
-                         std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_size << " bytes." << endl;
-                         output_file.close();
-                         fs::path file_path = "received/" + file_name;
-                         try {
-                             if (fs::remove(file_path)) {
-                                 std::cout << "[Server] File successfully deleted.\n";
-                             }
-                             else {
-                                 std::cout << "[Server] File did not exist.\n";
-                             }
-                         }
-                         catch (const fs::filesystem_error& err) {
-                             std::cerr << "[Server] Filesystem error: " << err.what() << '\n';
-                         }
-                     }
+            if (!file_received) {
+                std::cout << "[Server] Status: ERROR – File transfer incomplete. Received " << total_bytes_received << " bytes out of " << file_size << " bytes." << endl;
+                output_file.close();
+                fs::path file_path = "received/" + file_name;
+                try {
+                    if (fs::remove(file_path)) {
+                        std::cout << "[Server] File successfully deleted.\n";
+                    }
+                    else {
+                        std::cout << "[Server] File did not exist.\n";
+                    }
+                }
+                catch (const fs::filesystem_error& err) {
+                    std::cerr << "[Server] Filesystem error: " << err.what() << '\n';
+                }
+            }
             break;
         }
 
@@ -276,18 +275,27 @@ static void run_server()
             break;
         }
 
-        std::cout << "[Server] PDU recieved with size " << bytes_read << "bytes. Payload is " << bytes_read - kHeaderSize << " bytes." << std::endl;
+        std::cout << "[Server] PDU received with size " << bytes_read << "bytes. Payload is " << bytes_read - kHeaderSize << " bytes." << std::endl;
 
-        //DECRYPTION HERE
+        // DECRYPTION HERE
         bytes_read -= kHeaderSize;
         try {
-            decrypt_chunk(buffer_pdu, buffer_payload, secret_key);
+            // Pass the actual payload size (bytes_read) to decrypt_chunk
+            decrypt_chunk(buffer_pdu, bytes_read, buffer_payload, secret_key);
         }
         catch (const std::exception& e) {
             std::cerr << "Cryptographic Error: " << e.what() << std::endl;
+            // SECURE CLEANUP: If integrity check fails, stop writing and delete the corrupted file
+            output_file.close();
+            fs::path file_path = "received/" + file_name;
+            try {
+                fs::remove(file_path);
+            }
+            catch (...) {}
+            return;
         }
 
-        if (bytes_read > 0) {  
+        if (bytes_read > 0) {
             output_file.write(buffer_payload.data(), bytes_read);
             total_bytes_received += bytes_read;
             if (total_bytes_received == file_size) {
@@ -302,7 +310,7 @@ static void run_server()
                 break;
             }
 
-            if (file_size - total_bytes_received < kChunkSize) size_of_read  = file_size - total_bytes_received;
+            if (file_size - total_bytes_received < kChunkSize) size_of_read = file_size - total_bytes_received;
         }
     }
 }
@@ -323,16 +331,16 @@ static void run_client()
     ifstream input_file(file_to_send, ios::binary);
 
     if (!input_file) {
-        std::cout << "[Client] Failed to open source file " << file_to_send  << endl;
+        std::cout << "[Client] Failed to open source file " << file_to_send << endl;
         return;
     }
     else {
         file_size = filesystem::file_size(file_to_send);
         std::cout << "[Client] File " << file_to_send << " with size " << file_size << " will be sent." << endl;
-    }    
+    }
 
-	//tFileInfo structure is placed directly to buffer
-	void* p = buffer_pdu.data();
+    //tFileInfo structure is placed directly to buffer
+    void* p = buffer_pdu.data();
     tFileInfo* s_p = static_cast<tFileInfo*>(p);
     strncpy_s(s_p->name, sizeof(s_p->name), file_to_send.c_str(), _TRUNCATE);
     s_p->name[sizeof(s_p->name) - 1] = '\0'; // Ensure null-termination
@@ -370,7 +378,7 @@ static void run_client()
     {
         input_file.read(buffer_payload.data(), kChunkSize - kHeaderSize);
         bytes_read = input_file.gcount();
-		total_bytes_transmitted += bytes_read;
+        total_bytes_transmitted += bytes_read;
 
         if (bytes_read == 0) {
             socket.close();
@@ -379,15 +387,16 @@ static void run_client()
             break;
         }
 
-        //ENCRYPTION HERE
+        // ENCRYPTION HERE
         try {
-            encrypt_chunk(buffer_payload, buffer_pdu, secret_key);
+            // Pass the actual number of read bytes (bytes_read) to encrypt_chunk
+            encrypt_chunk(buffer_payload, bytes_read, buffer_pdu, secret_key);
         }
         catch (const std::exception& e) {
             std::cerr << "Cryptographic Error: " << e.what() << std::endl;
         }
 
-        std::cout << "[Client] transmitting PDU " << bytes_read + kHeaderSize << " bytes with payload " << bytes_read << " bytes." <<std::endl;
+        std::cout << "[Client] transmitting PDU " << bytes_read + kHeaderSize << " bytes with payload " << bytes_read << " bytes." << std::endl;
 
         boost::asio::write(socket, boost::asio::buffer(buffer_pdu, bytes_read + kHeaderSize), error);   // <-- blocks here
 
@@ -401,8 +410,8 @@ static void run_client()
 
 bool is_filename_ok(const string& s_input) {
     if (s_input.empty()) return false;
-	fs::path p(s_input);
-	return !p.has_parent_path() && p != "." && p != ".." && p.filename() == p;
+    fs::path p(s_input);
+    return !p.has_parent_path() && p != "." && p != ".." && p.filename() == p;
 }
 
 
@@ -411,9 +420,9 @@ int main(int argc, char* argv[])
     // "role,r" registers both the long form --role and the short form -r.
     po::options_description desc("Allowed options");
     desc.add_options()
-        ("help",   "produce help message")
+        ("help", "produce help message")
         ("role,r", po::value<string>(), "server or client")
-		("file,f", po::value<string>(), "file to send (client only)")
+        ("file,f", po::value<string>(), "file to send (client only)")
         ;
 
     po::variables_map vm;
@@ -437,19 +446,19 @@ int main(int argc, char* argv[])
         cerr << "Error: --file / -f argument required for client role." << endl;
         return EXIT_FAILURE;
     }
-    
+
     if (vm.count("file") && !vm["file"].empty()) {
         file_to_send = vm["file"].as<std::string>();
         if (!is_filename_ok(file_to_send)) {
             cerr << "Provided file name: " << file_to_send << " is not OK" << endl;
             return EXIT_FAILURE;
-        }        
+        }
     }
 
     string role = vm["role"].as<string>();
     std::cout << "Role: " << role << endl;
 
-    if      (role == "server") run_server();
+    if (role == "server") run_server();
     else if (role == "client") run_client();
     else
     {
