@@ -315,6 +315,7 @@ static void run_server()
             }
         }
         else {
+            output_file.close();
             std::cout << "[Server] Received the whole file " << endl;
             break;
         }
