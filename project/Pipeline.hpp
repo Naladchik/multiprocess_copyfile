@@ -5,7 +5,7 @@
 template <typename Derived>
 class ProcessorBase {
 public:
-    // 3 non-virtual member methods required by the prompt
+    // 3 non-virtual member methods
     template <typename Input, typename Output>
     bool ProcessData(const Input& input, Output& output) {
         return static_cast<Derived*>(this)->ProcessDataImpl(input, output);
