@@ -42,11 +42,11 @@ void run_client(const std::string& filepath) {
 
     std::vector<uint8_t> raw_chunk;
     EncryptedChunkMessage enc_chunk_msg;
+    std::vector<uint8_t> processed_raw;
 
     // Message processing flow loop
     while (reader_stage.WaitNextData(raw_chunk)) {
-        // Run raw reading step
-        std::vector<uint8_t> processed_raw;
+        // Run raw reading step        
         reader_stage.ProcessData(raw_chunk, processed_raw);
 
         // Run AES cryptographic step
@@ -92,10 +92,11 @@ void run_server() {
     PipelineStage<FileWriterInner> writer_stage(meta_msg.info.name);
 
     uint64_t total_written = 0;
+    uint32_t packet_size = 0;
     try {
         while (total_written < meta_msg.info.size) {
             // Read length prefix
-            uint32_t packet_size = 0;
+            packet_size = 0;
             boost::asio::read(socket, boost::asio::buffer(&packet_size, sizeof(packet_size)));
 
             // Read the full payload chunk
