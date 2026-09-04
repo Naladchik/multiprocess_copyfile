@@ -9,10 +9,10 @@
 constexpr bool MY_OWN_SORT = true; // Set to true to use custom sort, false to use std::sort
 
 // Lomuto partition scheme
-uint32_t MyPartition(std::vector<double>& vec, uint32_t lo, uint32_t hi) {
+int32_t MyPartition(std::vector<double>& vec, int32_t lo, int32_t hi) {
     double pivot = vec[hi];
-    uint32_t i = lo;
-    for (uint32_t j = lo; j <= hi - 1; j++) {
+    int32_t i = lo;
+    for (int32_t j = lo; j <= hi - 1; j++) {
         if (vec[j] <= pivot) {
             std::swap(vec[i], vec[j]);
 			i++;
@@ -22,9 +22,9 @@ uint32_t MyPartition(std::vector<double>& vec, uint32_t lo, uint32_t hi) {
 	return i;
 }
 
-void MyQsort(std::vector<double>& vec, uint32_t lo, uint32_t hi) {
+void MyQsort(std::vector<double>& vec, int32_t lo, int32_t hi) {
 	if ((lo >= hi) || (lo < 0)) return;
-	uint32_t p = MyPartition(vec, lo, hi);
+	int32_t p = MyPartition(vec, lo, hi);
 	MyQsort(vec, lo, p - 1);
 	MyQsort(vec, p + 1, hi);
 }
@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
 
     if(MY_OWN_SORT){
         std::cout << "Using MyQsort..." << std::endl;
-        uint32_t last_index = static_cast<uint32_t>(vec.size() - 1);
+        int32_t last_index = static_cast<int32_t>(vec.size() - 1);
         MyQsort(vec, 0, last_index);
     }
     else {
