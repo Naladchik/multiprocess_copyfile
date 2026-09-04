@@ -2,7 +2,6 @@
   "dependencies": [
     "boost-program-options",
     "boost-interprocess",
-    "boost-asio",
     "openssl"
   ]
 }

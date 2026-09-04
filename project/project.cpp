@@ -1,172 +1,117 @@
-#include <boost/asio.hpp>
-#include <boost/program_options.hpp>
 #include <iostream>
+#include <chrono>
+#include <thread>
+#include <random>
+#include <unordered_set>
 #include <vector>
-#include <cstring>
-#include <string>
-#include "Message.hpp"
-#include "Pipeline.hpp"
-#include "ClientStages.hpp"
-#include "ServerStages.hpp"
 
-using boost::asio::ip::tcp;
-namespace po = boost::program_options;
+constexpr bool MY_OWN_SORT = true; // Set to true to use custom sort, false to use std::sort
 
-const int PORT = 12345;
-const std::string key_source = "MySuperSecretKeyMustBe32Bytes!!!";
-constexpr size_t CHUNK_SIZE = 64 * 1024 - 256; // Leave space for safe packaging headers
-
-// CLIENT EXECUTION FLOW
-void run_client(const std::string& filepath) {
-    boost::asio::io_context io;
-    tcp::resolver resolver(io);
-    auto endpoints = resolver.resolve("127.0.0.1", std::to_string(PORT));
-    tcp::socket socket(io);
-
-    std::cout << "[Client] Connecting to 127.0.0.1:" << PORT << "..." << std::endl;
-    boost::asio::connect(socket, endpoints);
-    std::cout << "[Client] Connected!" << std::endl;
-
-    // A. Send File Metadata first
-    FileInfoMessage meta_msg;
-    meta_msg.info.size = std::filesystem::file_size(filepath);
-    strncpy_s(meta_msg.info.name, std::filesystem::path(filepath).filename().string().c_str(), sizeof(meta_msg.info.name) - 1);
-
-    std::vector<uint8_t> net_buffer;
-    meta_msg.Serialize(net_buffer);
-    boost::asio::write(socket, boost::asio::buffer(net_buffer));
-
-    // B. Build the Client Pipeline using Policies
-    PipelineStage<FileReaderInner> reader_stage(filepath, CHUNK_SIZE);
-    PipelineStage<EncryptionInner> crypto_stage(key_source);
-
-    std::vector<uint8_t> raw_chunk;
-    EncryptedChunkMessage enc_chunk_msg;
-    std::vector<uint8_t> processed_raw;
-
-    // Message processing flow loop
-    while (reader_stage.WaitNextData(raw_chunk)) {
-        // Run raw reading step        
-        reader_stage.ProcessData(raw_chunk, processed_raw);
-
-        // Run AES cryptographic step
-        if (crypto_stage.ProcessData(processed_raw, enc_chunk_msg)) {
-            // Serialize and transmit the safe network frame
-            enc_chunk_msg.Serialize(net_buffer);
-
-            // Send length prefix so the receiver knows exactly how much to read
-            uint32_t packet_size = static_cast<uint32_t>(net_buffer.size());
-            boost::asio::write(socket, boost::asio::buffer(&packet_size, sizeof(packet_size)));
-            boost::asio::write(socket, boost::asio::buffer(net_buffer));
-        }
-    }
-
-    reader_stage.NotifyComplete();
-    crypto_stage.NotifyComplete();
-    std::cout << "[Client] Transmission successfully finished!" << std::endl;
+void MyQsort(std::vector<double>& vec) {
+	vec[1] = 0.0; // Set the second element to 0.0
 }
 
-// SERVER EXECUTION FLOW
-void run_server() {
-    boost::asio::io_context io;
-    tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), PORT));
-    std::cout << "[Server] Listening on port " << PORT << "..." << std::endl;
+int compareDoubles(const void* a, const void* b) {
+    double arg1 = *static_cast<const double*>(a);
+    double arg2 = *static_cast<const double*>(b);
 
-    tcp::socket socket(io);
-    acceptor.accept(socket);
-    std::cout << "[Server] Connection received from: " << socket.remote_endpoint().address().to_string() << std::endl;
+    if (arg1 < arg2) return -1;
+    if (arg1 > arg2) return 1;
+    return 0;
+}
 
-    // A. Receive File Metadata first
-    std::vector<uint8_t> recv_buf(sizeof(FileInfoPayload));
-    boost::asio::read(socket, boost::asio::buffer(recv_buf));
-
-    FileInfoMessage meta_msg;
-    if (!meta_msg.Deserialize(recv_buf)) {
-        std::cerr << "[Server] Failed to deserialize metadata." << std::endl;
-        return;
-    }
-    std::cout << "[Server] Metadata received: " << meta_msg.info.name << " (" << meta_msg.info.size << " bytes)" << std::endl;
-
-    // B. Build Server Pipeline
-    PipelineStage<DecryptionInner> crypto_stage(key_source);
-    PipelineStage<FileWriterInner> writer_stage(meta_msg.info.name);
-
-    uint64_t total_written = 0;
-    uint32_t packet_size = 0;
-    try {
-        while (total_written < meta_msg.info.size) {
-            // Read length prefix
-            packet_size = 0;
-            boost::asio::read(socket, boost::asio::buffer(&packet_size, sizeof(packet_size)));
-
-            // Read the full payload chunk
-            recv_buf.resize(packet_size);
-            boost::asio::read(socket, boost::asio::buffer(recv_buf));
-
-            EncryptedChunkMessage enc_chunk_msg;
-            if (!enc_chunk_msg.Deserialize(recv_buf)) {
-                throw std::runtime_error("Corrupted message deserialization.");
-            }
-
-            // Execute Decryption Policy
-            std::vector<uint8_t> plaintext;
-            if (crypto_stage.ProcessData(enc_chunk_msg, plaintext)) {
-                // Execute Writer Policy
-                bool write_success = false;
-                writer_stage.ProcessData(plaintext, write_success);
-                if (!write_success) {
-                    throw std::runtime_error("Writing output stream crashed.");
-                }
-                total_written += plaintext.size();
-            }
+void checkIfSorted(const std::vector<double>& vec) {
+	bool result = true;
+    for (size_t i = 1; i < vec.size(); ++i) {
+        if (vec[i - 1] > vec[i]) {
+            result = false;
+            break;
         }
+    }
+    if (result) {
+        std::cout << "Checked: array is sorted." << std::endl;
+    }
+    else {
+        std::cout << "Checked: array is NOT sorted." << std::endl;
+    }
+}
 
-        crypto_stage.NotifyComplete();
-        writer_stage.NotifyComplete();
-        std::cout << "[Server] Successfully completed saving secure file." << std::endl;
+double findMax(const std::vector<double>& vec) {
+    double max_val = vec[0];
+    for (const auto& val : vec) {
+        if (val > max_val) {
+            max_val = val;
+        }
     }
-    catch (const std::exception& e) {
-        std::cerr << "[Server Exception] " << e.what() << std::endl;
-        writer_stage.GetInner().AbortAndCleanup();
+    return max_val;
+}
+
+double findMin(const std::vector<double>& vec) {
+    double min_val = vec[0];
+    for (const auto& val : vec) {
+        if (val < min_val) {
+            min_val = val;
+        }
     }
+    return min_val;
 }
 
 int main(int argc, char* argv[]) {
-    po::options_description desc("Allowed options");
-    desc.add_options()
-        ("help", "produce help message")
-        ("role,r", po::value<std::string>(), "server or client")
-        ("file,f", po::value<std::string>(), "file to send (client only)");
-
-    po::variables_map vm;
-    po::store(po::parse_command_line(argc, argv, desc), vm);
-    po::notify(vm);
-
-    if (vm.count("help")) {
-        std::cout << desc << std::endl;
-        return EXIT_SUCCESS;
-    }
-
-    if (!vm.count("role")) {
-        std::cerr << "Error: --role / -r is mandatory." << std::endl;
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <target_count>\n";
         return EXIT_FAILURE;
     }
 
-    std::string role = vm["role"].as<std::string>();
-    if (role == "client") {
-        if (!vm.count("file")) {
-            std::cerr << "Error: Client role requires path selection via --file." << std::endl;
-            return EXIT_FAILURE;
+    size_t target_count = 0;
+    try {
+        size_t idx = 0;
+        long long parsed_val = std::stoll(argv[1], &idx);
+        if (parsed_val <= 0 || idx != std::string(argv[1]).length()) {
+            throw std::out_of_range("Invalid positive integer.");
         }
-        run_client(vm["file"].as<std::string>());
+        target_count = static_cast<size_t>(parsed_val);
     }
-    else if (role == "server") {
-        run_server();
+    catch (const std::exception&) {
+        std::cerr << "Error: Please provide a valid positive integer for target_count.\n";
+        return EXIT_FAILURE;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    // -------------------------------------------------------------
+
+    constexpr double min_val = 1.0;         // Minimum range value
+    constexpr double max_val = 100.0;       // Maximum range value
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<double> dis(min_val, max_val);
+    std::unordered_set<double> unique_numbers;
+    while (unique_numbers.size() < target_count) {
+        double random_value = dis(gen);
+        unique_numbers.insert(random_value);
+    }
+    std::vector<double> vec(unique_numbers.begin(), unique_numbers.end());
+    std::cout << "Generated array of " << unique_numbers.size() << " double values" << std::endl;
+    std::cout << "Max is " << findMax(vec) << " min is " << findMin(vec) << std::endl;
+
+    checkIfSorted(vec);
+
+    if(MY_OWN_SORT){
+        std::cout << "Using MyQsort..." << std::endl;
+        MyQsort(vec);
     }
     else {
-        std::cerr << "Error: unknown role type." << std::endl;
-        return EXIT_FAILURE;
-    }
+        std::cout << "Using std::qsort..." << std::endl;
+        std::qsort(vec.data(), vec.size(), sizeof(double), compareDoubles);
+        //std::cout << "Using std::sort..." << std::endl;
+        //std::sort(vec.begin(), vec.end());
+	}
 
+    checkIfSorted(vec);
+
+    // -------------------------------------------------------------
+    auto end = std::chrono::steady_clock::now();
+    std::chrono::duration<double, std::milli> elapsed_ms = end - start;
+    std::cout << "Execution time: " << elapsed_ms.count() << " ms" << std::endl << std::endl;
     return EXIT_SUCCESS;
 }
