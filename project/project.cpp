@@ -4,11 +4,29 @@
 #include <random>
 #include <unordered_set>
 #include <vector>
+#include <cstdint>
 
 constexpr bool MY_OWN_SORT = true; // Set to true to use custom sort, false to use std::sort
 
-void MyQsort(std::vector<double>& vec) {
-	vec[1] = 0.0; // Set the second element to 0.0
+// Lomuto partition scheme
+uint32_t MyPartition(std::vector<double>& vec, uint32_t lo, uint32_t hi) {
+    double pivot = vec[hi];
+    uint32_t i = lo;
+    for (uint32_t j = lo; j <= hi - 1; j++) {
+        if (vec[j] <= pivot) {
+            std::swap(vec[i], vec[j]);
+			i++;
+        }
+    }
+	std::swap(vec[i], vec[hi]);
+	return i;
+}
+
+void MyQsort(std::vector<double>& vec, uint32_t lo, uint32_t hi) {
+	if ((lo >= hi) || (lo < 0)) return;
+	uint32_t p = MyPartition(vec, lo, hi);
+	MyQsort(vec, lo, p - 1);
+	MyQsort(vec, p + 1, hi);
 }
 
 int compareDoubles(const void* a, const void* b) {
@@ -98,7 +116,8 @@ int main(int argc, char* argv[]) {
 
     if(MY_OWN_SORT){
         std::cout << "Using MyQsort..." << std::endl;
-        MyQsort(vec);
+        uint32_t last_index = static_cast<uint32_t>(vec.size() - 1);
+        MyQsort(vec, 0, last_index);
     }
     else {
         std::cout << "Using std::qsort..." << std::endl;
