@@ -226,11 +226,10 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    auto start = std::chrono::steady_clock::now();
-    // -------------------------------------------------------------
-
     constexpr double min_val = 1.0;         // Minimum range value
     constexpr double max_val = 100.0;       // Maximum range value
+
+    std::cout << "Generation of array of double values was started..." << std::endl;
 
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -246,6 +245,9 @@ int main(int argc, char* argv[]) {
 
     checkIfSorted(vec);
 
+    auto start = std::chrono::steady_clock::now();
+    // -------------------------------------------------------------
+
     if(MY_OWN_SORT){
         std::cout << "Using a custom sort function..." << std::endl;
         int32_t last_index = static_cast<int32_t>(vec.size() - 1);
@@ -256,17 +258,16 @@ int main(int argc, char* argv[]) {
         MyQsortParallelIterative(vec, 0, last_index);
     }
     else {
-        std::cout << "Using std::qsort..." << std::endl;
-        std::qsort(vec.data(), vec.size(), sizeof(double), compareDoubles);
-        //std::cout << "Using std::sort..." << std::endl;
-        //std::sort(vec.begin(), vec.end());
+        //std::cout << "Using std::qsort..." << std::endl;
+        //std::qsort(vec.data(), vec.size(), sizeof(double), compareDoubles);
+        std::cout << "Using std::sort..." << std::endl;
+        std::sort(vec.begin(), vec.end());
 	}
-
-    checkIfSorted(vec);
 
     // -------------------------------------------------------------
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double, std::milli> elapsed_ms = end - start;
     std::cout << "Execution time: " << elapsed_ms.count() << " ms" << std::endl << std::endl;
+    checkIfSorted(vec);
     return EXIT_SUCCESS;
 }
