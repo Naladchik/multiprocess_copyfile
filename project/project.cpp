@@ -10,6 +10,7 @@
 #include <queue>
 #include <atomic>
 #include <utility>
+#include <algorithm>
 
 constexpr bool MY_OWN_SORT = true; // Set to true to use custom sort, false to use std::sort
 
@@ -186,15 +187,15 @@ void checkIfSorted(const std::vector<double>& vec) {
     }
 }
 
-double findMax(const std::vector<double>& vec) {
-    double max_val = vec[0];
-    for (const auto& val : vec) {
-        if (val > max_val) {
-            max_val = val;
-        }
-    }
-    return max_val;
-}
+//double findMax(const std::vector<double>& vec) {
+//    double max_val = vec[0];
+//    for (const auto& val : vec) {
+//        if (val > max_val) {
+//            max_val = val;
+//        }
+//    }
+//    return max_val;
+//}
 
 double findMin(const std::vector<double>& vec) {
     double min_val = vec[0];
@@ -241,15 +242,24 @@ int main(int argc, char* argv[]) {
     }
     std::vector<double> vec(unique_numbers.begin(), unique_numbers.end());
     std::cout << "Generated array of " << unique_numbers.size() << " double values" << std::endl;
-    std::cout << "Max is " << findMax(vec) << " min is " << findMin(vec) << std::endl;
+    //std::vector<double>::iterator result_max;
+    auto result_max = std::max_element(vec.begin(), vec.end());
+    std::cout << "Max is " << *result_max << " min is " << findMin(vec) << std::endl;
 
     checkIfSorted(vec);
+
+    if (MY_OWN_SORT) {
+        std::cout << "Using a custom sort function..." << std::endl;        
+    }
+    else {
+        //std::cout << "Using std::qsort..." << std::endl;
+        std::cout << "Using std::sort..." << std::endl;
+    }
 
     auto start = std::chrono::steady_clock::now();
     // -------------------------------------------------------------
 
     if(MY_OWN_SORT){
-        std::cout << "Using a custom sort function..." << std::endl;
         int32_t last_index = static_cast<int32_t>(vec.size() - 1);
 
         // uncomment one of 3 options
@@ -258,9 +268,7 @@ int main(int argc, char* argv[]) {
         MyQsortParallelIterative(vec, 0, last_index);
     }
     else {
-        //std::cout << "Using std::qsort..." << std::endl;
         //std::qsort(vec.data(), vec.size(), sizeof(double), compareDoubles);
-        std::cout << "Using std::sort..." << std::endl;
         std::sort(vec.begin(), vec.end());
 	}
 
