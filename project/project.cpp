@@ -56,9 +56,9 @@ void MyQsortRecursive(std::vector<double>& vec, int32_t lo, int32_t hi) {
 void MyQsortParallelIterative(std::vector<double>& vec, int32_t lo, int32_t hi) {
     if ((lo >= hi) || (lo < 0)) return;
 
-	int32_t size_threshold = 1000; // Threshold for switching to single-threaded quicksort
+    int32_t size_threshold = 1000; // Threshold for switching to single-threaded quicksort
     if (hi - lo < size_threshold) {
-		std::cout << "Array size is small (less than "<< size_threshold <<"), using single - threaded MyQsort..." << std::endl;
+        std::cout << "Array size is small (less than " << size_threshold << "), using single - threaded MyQsort..." << std::endl;
         MyQsortIterative(vec, lo, hi);
         return;
     }
@@ -97,7 +97,7 @@ void MyQsortParallelIterative(std::vector<double>& vec, int32_t lo, int32_t hi) 
                     return !task_queue.empty() || shutdown.load();
                     });
 
-                if (shutdown.load()) {
+                if (shutdown.load() && task_queue.empty()) {
                     break;
                 }
 
@@ -120,12 +120,22 @@ void MyQsortParallelIterative(std::vector<double>& vec, int32_t lo, int32_t hi) 
                     std::lock_guard<std::mutex> lock(queue_mutex);
 
                     if (left_range.lo < left_range.hi) {
-                        task_queue.push(left_range);
-                        active_tasks++;
+                        if ((left_range.hi - left_range.lo) < size_threshold) {
+                            MyQsortIterative(vec, left_range.lo, left_range.hi);
+                        }
+                        else {
+                            task_queue.push(left_range);
+                            active_tasks++;
+                        }
                     }
                     if (right_range.lo < right_range.hi) {
-                        task_queue.push(right_range);
-                        active_tasks++;
+                        if ((right_range.hi - right_range.lo) < size_threshold) {
+                            MyQsortIterative(vec, right_range.lo, right_range.hi);
+                        }
+                        else {
+                            task_queue.push(right_range);
+                            active_tasks++;
+                        }
                     }
                 }
 
